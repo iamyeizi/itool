@@ -63,7 +63,6 @@ def _resource_base_dir():
 BASE_DIR = _resource_base_dir()
 
 # --- Variables globales ---
-NETWORK_CACHE_SECONDS = 30
 NETWORK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix='itool-net')
 DATA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='itool-data')
 
@@ -111,7 +110,6 @@ class IToolApp(tk.Tk):
         self.ping_cache = {}       # IP -> bool (ping result)
         self.ssh_port_cache = load_ssh_port_cache()
         self.rdp_port_cache = {}   # IP -> bool (port 3389)
-        self.cache_timeout = NETWORK_CACHE_SECONDS
         self.last_check_time = {}  # (tipo, IP) -> timestamp
         self.ssh_cache_dirty = False
         self.ssh_cache_save_timer = None
@@ -125,7 +123,6 @@ class IToolApp(tk.Tk):
         self.after(50, self._drain_ui_events)
         self.after(1, self.refresh_data)
         self.after(150, self._animate_status)
-        self.after(self.cache_timeout * 1000, self._periodic_network_refresh)
 
     def _set_app_icon(self):
         """Configura el icono de la ventana según el sistema operativo.
@@ -271,14 +268,12 @@ class IToolApp(tk.Tk):
         self.destroy()
 
     def _is_cache_valid(self, check_type, ip):
-        """Verifica la vigencia de un resultado de red específico."""
-        import time
-        timestamp = self.last_check_time.get((check_type, ip))
-        return timestamp is not None and time.time() - timestamp < self.cache_timeout
+        """Indica si ya hay un resultado de red durante esta sesión."""
+        return (check_type, ip) in self.last_check_time
 
-    def _submit_check(self, check_type, ip, worker):
+    def _submit_check(self, check_type, ip, worker, force=False):
         key = (check_type, ip)
-        if key in self.pending_checks or self._is_cache_valid(check_type, ip):
+        if key in self.pending_checks or (not force and self._is_cache_valid(check_type, ip)):
             return
 
         self.pending_checks.add(key)
@@ -298,8 +293,8 @@ class IToolApp(tk.Tk):
 
         future.add_done_callback(publish_result)
 
-    def _schedule_network_checks(self):
-        """Comprueba solo las filas visibles, sin bloquear la interfaz."""
+    def _schedule_network_checks(self, enqueue=True, force=False):
+        """Actualiza el alcance visible y, solo cuando corresponde, comprueba red."""
         ips = {str(pc.get('ip', '')).strip() for pc in self.filtered_list}
         valid_ips = {ip for ip in ips if is_valid_ip(ip)}
         self.active_check_keys = {
@@ -310,22 +305,18 @@ class IToolApp(tk.Tk):
         for key, future in tuple(self.network_futures.items()):
             if key not in self.active_check_keys:
                 future.cancel()
-        for ip in valid_ips:
-            if not is_valid_ip(ip):
-                continue
-            self._submit_check('ping', ip, ping_host)
-            self._submit_check('rdp', ip, lambda target: tcp_port_is_open(target, 3389))
-            preferred_port = self.ssh_port_cache.get(ip)
-            self._submit_check(
-                'ssh',
-                ip,
-                lambda target, preferred=preferred_port: detect_ssh_port(target, preferred),
-            )
+        if enqueue:
+            for ip in valid_ips:
+                self._submit_check('ping', ip, ping_host, force)
+                self._submit_check('rdp', ip, lambda target: tcp_port_is_open(target, 3389), force)
+                preferred_port = self.ssh_port_cache.get(ip)
+                self._submit_check(
+                    'ssh',
+                    ip,
+                    lambda target, preferred=preferred_port: detect_ssh_port(target, preferred),
+                    force,
+                )
         self._refresh_status()
-
-    def _periodic_network_refresh(self):
-        self._schedule_network_checks()
-        self.after(self.cache_timeout * 1000, self._periodic_network_refresh)
 
     def _drain_ui_events(self):
         """Aplica resultados en el hilo de Tkinter, nunca desde un worker."""
@@ -401,7 +392,7 @@ class IToolApp(tk.Tk):
         if not self.window_size_set:
             self.adjust_window_to_content()
             self.window_size_set = True
-        self._schedule_network_checks()
+        self._schedule_network_checks(force=True)
         self._refresh_status()
 
     def _apply_data_error(self):
@@ -411,6 +402,7 @@ class IToolApp(tk.Tk):
         self.refresh_button.config(state='normal')
         if not self.pc_list:
             self.create_grid()
+        self._schedule_network_checks(force=True)
         self._refresh_status()
 
     def _apply_network_result(self, check_type, ip, result):
@@ -572,7 +564,7 @@ class IToolApp(tk.Tk):
 
         logging.debug(f"Resultados del filtro: {len(filtered_list)} PCs")
         self.update_grid_display()
-        self._schedule_network_checks()
+        self._schedule_network_checks(enqueue=False)
         self._refresh_status()
 
     def refresh_data(self):
