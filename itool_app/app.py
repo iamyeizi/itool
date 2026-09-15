@@ -23,6 +23,7 @@ from itool_app.networking import (
     load_ssh_port_cache,
     save_ssh_port_cache,
 )
+from itool_app.clipboard import copy_text
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.sheets_source import describe_sheet_error, fetch_pc_records
 from itool_app.settings import load_ui_settings, save_ui_settings
@@ -295,9 +296,7 @@ class IToolApp(tk.Tk):
     def _copy_to_clipboard(self, value, label):
         if not value:
             return
-        self.clipboard_clear()
-        self.clipboard_append(str(value))
-        self.update_idletasks()
+        copy_text(self, value)
         self.copy_notice = f'{label} copiado'
         self._refresh_status()
         self.after(2000, self._clear_copy_notice)

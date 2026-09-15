@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from itool_app import clipboard
 from itool_app import networking
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.settings import load_ui_settings, save_ui_settings
@@ -38,6 +39,33 @@ class NetworkModuleTests(unittest.TestCase):
             )
 
 
+class ClipboardModuleTests(unittest.TestCase):
+    def test_wsl_uses_windows_clipboard_bridge(self):
+        root = Mock()
+        with patch.object(clipboard.platform, 'system', return_value='Linux'), patch.object(
+            clipboard.shutil,
+            'which',
+            return_value='/mnt/c/Windows/System32/clip.exe',
+        ), patch.object(clipboard.subprocess, 'run') as run:
+            clipboard.copy_text(root, 'copied-value')
+
+        run.assert_called_once_with(
+            ['clip.exe'],
+            input='copied-value',
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        root.clipboard_clear.assert_not_called()
+
+    def test_native_clipboard_is_used_without_wsl_bridge(self):
+        root = Mock()
+        with patch.object(clipboard.platform, 'system', return_value='Windows'):
+            clipboard.copy_text(root, 'copied-value')
+
+        root.clipboard_clear.assert_called_once_with()
+        root.clipboard_append.assert_called_once_with('copied-value')
+        root.update.assert_called_once_with()
 class RdpModuleTests(unittest.TestCase):
     def test_normalize_local_and_explicit_rdp_usernames(self):
         self.assertEqual(normalize_rdp_username('opera'), '.\\opera')
