@@ -105,6 +105,7 @@ class IToolApp(tk.Tk):
         self.last_search_query = None
         self.ui_events = Queue()
         self.pending_checks = set()
+        self.network_futures = {}
         self.active_check_keys = set()
         self.data_loading = False
         self.last_sheet_update = None
@@ -288,8 +289,12 @@ class IToolApp(tk.Tk):
 
         self.pending_checks.add(key)
         future = NETWORK_EXECUTOR.submit(worker, ip)
+        self.network_futures[key] = future
 
         def publish_result(completed_future):
+            if completed_future.cancelled():
+                self.ui_events.put(('network_cancelled', key))
+                return
             try:
                 result = completed_future.result()
             except Exception as error:
@@ -300,14 +305,17 @@ class IToolApp(tk.Tk):
         future.add_done_callback(publish_result)
 
     def _schedule_network_checks(self):
-        """Encola chequeos limitados sin bloquear el hilo de la interfaz."""
-        ips = {str(pc.get('ip', '')).strip() for pc in self.pc_list}
+        """Comprueba solo las filas visibles, sin bloquear la interfaz."""
+        ips = {str(pc.get('ip', '')).strip() for pc in self.filtered_list}
         valid_ips = {ip for ip in ips if is_valid_ip(ip)}
         self.active_check_keys = {
             (check_type, ip)
             for ip in valid_ips
             for check_type in ('ping', 'rdp', 'ssh')
         }
+        for key, future in tuple(self.network_futures.items()):
+            if key not in self.active_check_keys:
+                future.cancel()
         for ip in valid_ips:
             if not is_valid_ip(ip):
                 continue
@@ -332,6 +340,10 @@ class IToolApp(tk.Tk):
                 event = self.ui_events.get_nowait()
                 if event[0] == 'data':
                     self._apply_data(event[1])
+                elif event[0] == 'network_cancelled':
+                    self.pending_checks.discard(event[1])
+                    self.network_futures.pop(event[1], None)
+                    self._refresh_status()
                 else:
                     _, check_type, ip, result = event
                     self._apply_network_result(check_type, ip, result)
@@ -346,7 +358,7 @@ class IToolApp(tk.Tk):
             for key in self.active_check_keys
             if key not in self.pending_checks and self._is_cache_valid(*key)
         )
-        network_loading = bool(self.pending_checks)
+        network_loading = any(key in self.pending_checks for key in self.active_check_keys)
         self.status_var.set(
             format_status_text(
                 len(self.pc_list),
@@ -397,6 +409,7 @@ class IToolApp(tk.Tk):
     def _apply_network_result(self, check_type, ip, result):
         import time
         self.pending_checks.discard((check_type, ip))
+        self.network_futures.pop((check_type, ip), None)
         self.last_check_time[(check_type, ip)] = time.time()
         if check_type == 'ping':
             self.ping_cache[ip] = bool(result)
@@ -552,6 +565,7 @@ class IToolApp(tk.Tk):
 
         logging.debug(f"Resultados del filtro: {len(filtered_list)} PCs")
         self.update_grid_display()
+        self._schedule_network_checks()
         self._refresh_status()
 
     def refresh_data(self):
