@@ -848,14 +848,19 @@ class IToolApp(tk.Tk):
         if self.system == 'windows':
             logging.info("Iniciando conexión RDP en Windows")
             usuario_rdp = normalize_rdp_username(pc["usuario"])
-            # Guarda las credenciales en el Administrador de Credenciales de Windows
+            # Guarda las credenciales en el Administrador de Credenciales de Windows.
+            # El usuario se conserva sin prefijos locales del cliente para que se
+            # autentique contra el equipo remoto.
+            credentials_saved = False
             try:
-                subprocess.call([
+                credentials_saved = subprocess.call([
                     'cmdkey',
                     f'/add:TERMSRV/{ip}',
                     f'/user:{usuario_rdp}',
                     f'/pass:{pc["contrasenia"]}'
-                ])
+                ]) == 0
+                if not credentials_saved:
+                    logging.error("cmdkey no pudo guardar la credencial RDP")
             except FileNotFoundError:
                 logging.error("cmdkey no encontrado")
 
@@ -908,10 +913,13 @@ class IToolApp(tk.Tk):
             except FileNotFoundError:
                 logging.error("mstsc no encontrado para conexión normal")
             threading.Timer(10, lambda: os.remove(temp_rdp) if os.path.exists(temp_rdp) else None).start()
-            # Borrar credenciales
-            threading.Timer(60, lambda: subprocess.call([
-                'cmdkey', f'/delete:TERMSRV/{ip}'
-            ])).start()
+            # La advertencia de seguridad de Windows puede requerir interacción
+            # antes de abrir la conexión. Mantener la credencial cinco minutos
+            # evita que el temporizador la borre mientras el usuario la confirma.
+            if credentials_saved:
+                threading.Timer(300, lambda: subprocess.call([
+                    'cmdkey', f'/delete:TERMSRV/{ip}'
+                ])).start()
         else:
             # Linux / otros
             rdp_client = self._get_linux_rdp_client()

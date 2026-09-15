@@ -68,7 +68,7 @@ class ClipboardModuleTests(unittest.TestCase):
         root.update.assert_called_once_with()
 class RdpModuleTests(unittest.TestCase):
     def test_normalize_local_and_explicit_rdp_usernames(self):
-        self.assertEqual(normalize_rdp_username('opera'), '.\\opera')
+        self.assertEqual(normalize_rdp_username('opera'), 'opera')
         self.assertEqual(normalize_rdp_username('PC\\opera'), 'PC\\opera')
         self.assertEqual(normalize_rdp_username('persona@empresa.example'), 'persona@empresa.example')
 
