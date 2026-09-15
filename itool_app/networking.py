@@ -34,7 +34,7 @@ def ip_vlan_host_sort_key(value):
     return (1, 0, 0)
 
 
-def check_ping(ip):
+def ping_host(ip):
     if not is_valid_ip(ip):
         return False
     try:
@@ -53,7 +53,7 @@ def check_ping(ip):
         return False
 
 
-def is_port_open(ip, port, timeout=NETWORK_TIMEOUT_SECONDS):
+def tcp_port_is_open(ip, port, timeout=NETWORK_TIMEOUT_SECONDS):
     if not is_valid_ip(ip):
         return False
     try:
@@ -64,15 +64,15 @@ def is_port_open(ip, port, timeout=NETWORK_TIMEOUT_SECONDS):
         return False
 
 
-def get_open_ssh_port(ip, preferred_port=None):
+def detect_ssh_port(ip, preferred_port=None):
     if not is_valid_ip(ip):
         return None
     ports = ((preferred_port,) if preferred_port in SSH_PORTS else ())
     ports += tuple(port for port in SSH_PORTS if port != preferred_port)
-    return next((port for port in ports if is_port_open(ip, port)), None)
+    return next((port for port in ports if tcp_port_is_open(ip, port)), None)
 
 
-def network_cache_path():
+def default_network_cache_path():
     if platform.system().lower() == 'windows':
         state_dir = os.path.join(os.getenv('LOCALAPPDATA', os.path.expanduser('~')), 'iTool')
     else:
@@ -82,7 +82,7 @@ def network_cache_path():
 
 def load_ssh_port_cache(cache_path=None):
     try:
-        with open(cache_path or network_cache_path(), encoding='utf-8') as cache_file:
+        with open(cache_path or default_network_cache_path(), encoding='utf-8') as cache_file:
             cached_ports = json.load(cache_file).get('ssh_ports', {})
         return {
             ip: port
@@ -94,7 +94,7 @@ def load_ssh_port_cache(cache_path=None):
 
 
 def save_ssh_port_cache(ssh_port_cache, cache_path=None):
-    cache_path = cache_path or network_cache_path()
+    cache_path = cache_path or default_network_cache_path()
     state_dir = os.path.dirname(cache_path)
     valid_ports = {
         ip: port

@@ -1,4 +1,4 @@
-def status_text(equipment_count, last_update, complete_checks, total_checks, loading):
+def format_status_text(equipment_count, last_update, complete_checks, total_checks, loading):
     sheet_status = (
         'Cargando hoja…'
         if loading and not last_update
@@ -10,7 +10,7 @@ def status_text(equipment_count, last_update, complete_checks, total_checks, loa
     return f'{sheet_status} · {prefix}: {complete_checks}/{total_checks}'
 
 
-class ToolTip:
+class HoverTooltip:
     """Tooltip liviano cuyo texto puede cambiar durante la ejecución."""
 
     def __init__(self, widget, text_provider):
@@ -37,4 +37,3 @@ class ToolTip:
             self.window.destroy()
             self.window = None
 import tkinter as tk
-

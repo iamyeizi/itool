@@ -10,7 +10,7 @@ SCOPE = (
 )
 
 
-def get_pc_list(base_dir, spreadsheet_name='bd_pcs'):
+def fetch_pc_records(base_dir, spreadsheet_name='bd_pcs'):
     credential_path = os.path.join(base_dir, 'credential.json')
     credentials = ServiceAccountCredentials.from_json_keyfile_name(credential_path, SCOPE)
     client = gspread.authorize(credentials)
