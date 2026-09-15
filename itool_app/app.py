@@ -68,15 +68,10 @@ NETWORK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix='itool-
 DATA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='itool-data')
 
 def fetch_pc_list():
-    try:
-        logging.info("Obteniendo datos de Google Sheets...")
-        data = fetch_pc_records(BASE_DIR)
-        logging.info(f"Datos obtenidos: {len(data)} registros")
-        return data
-    except Exception as e:
-        logging.error(f"Error al leer Google Sheets: {e}")
-        print(f"Error al leer Google Sheets: {e}")
-        return []
+    logging.info("Obteniendo datos de Google Sheets...")
+    data = fetch_pc_records(BASE_DIR)
+    logging.info(f"Datos obtenidos: {len(data)} registros")
+    return data
 
 class IToolApp(tk.Tk):
     def __init__(self):
@@ -108,6 +103,7 @@ class IToolApp(tk.Tk):
         self.network_futures = {}
         self.active_check_keys = set()
         self.data_loading = False
+        self.data_error = None
         self.last_sheet_update = None
         self.spinner_index = 0
 
@@ -338,6 +334,8 @@ class IToolApp(tk.Tk):
                 event = self.ui_events.get_nowait()
                 if event[0] == 'data':
                     self._apply_data(event[1])
+                elif event[0] == 'data_error':
+                    self._apply_data_error()
                 elif event[0] == 'network_cancelled':
                     self.pending_checks.discard(event[1])
                     self.network_futures.pop(event[1], None)
@@ -366,6 +364,7 @@ class IToolApp(tk.Tk):
                 total_checks,
                 self.data_loading,
                 network_loading,
+                self.data_error,
             )
         )
         self.spinner_var.set(
@@ -380,6 +379,7 @@ class IToolApp(tk.Tk):
 
     def _apply_data(self, data):
         self.data_loading = False
+        self.data_error = None
         self.refresh_button.config(state='normal')
         import time
         self.last_sheet_update = time.strftime('%H:%M:%S')
@@ -402,6 +402,15 @@ class IToolApp(tk.Tk):
             self.adjust_window_to_content()
             self.window_size_set = True
         self._schedule_network_checks()
+        self._refresh_status()
+
+    def _apply_data_error(self):
+        """Conserva los datos visibles si una actualización de la hoja falla."""
+        self.data_loading = False
+        self.data_error = 'No se pudo actualizar la hoja'
+        self.refresh_button.config(state='normal')
+        if not self.pc_list:
+            self.create_grid()
         self._refresh_status()
 
     def _apply_network_result(self, check_type, ip, result):
@@ -581,7 +590,8 @@ class IToolApp(tk.Tk):
                 data = completed_future.result()
             except Exception as error:
                 logging.error(f"Error al refrescar datos: {error}")
-                data = []
+                self.ui_events.put(('data_error',))
+                return
             self.ui_events.put(('data', data))
 
         future.add_done_callback(publish_data)
@@ -680,7 +690,12 @@ class IToolApp(tk.Tk):
         self.rdp_buttons.clear()
 
         if not self.filtered_list:
-            message = 'No hay equipos que coincidan con el filtro.' if self.pc_list else 'La hoja no tiene equipos.'
+            if self.pc_list:
+                message = 'No hay equipos que coincidan con el filtro.'
+            elif self.data_error:
+                message = 'No se pudo cargar la hoja. Probá actualizar.'
+            else:
+                message = 'La hoja no tiene equipos.'
             tk.Label(
                 self.scrollable_frame,
                 text=message,

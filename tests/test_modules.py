@@ -62,3 +62,9 @@ class UiModuleTests(unittest.TestCase):
             format_status_text(122, 8, '12:34:56', 5, 366, False, True),
             '122 equipos · 8 visibles · hoja 12:34:56 · Comprobando red: 5/366',
         )
+
+    def test_format_status_text_reports_sheet_error(self):
+        self.assertEqual(
+            format_status_text(122, 8, '12:34:56', 27, 27, False, False, 'No se pudo actualizar la hoja'),
+            '122 equipos · 8 visibles · hoja 12:34:56 · No se pudo actualizar la hoja · Red: 27/27',
+        )
