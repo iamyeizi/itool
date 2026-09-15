@@ -16,6 +16,7 @@ err()  { log "[ERR]  $*" >&2; }
 # Ir al directorio del script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+export PIPENV_VENV_IN_PROJECT=1
 
 printf "\n\033[33m🔴 Iniciando iTool (dev) ...\033[0m\n\n"
 
@@ -74,6 +75,14 @@ if ! command -v pipenv >/dev/null 2>&1; then
 fi
 ok "Pipenv: $(pipenv --version 2>/dev/null || echo "instalado")"
 
+# Todas las operaciones de Python deben usar el intérprete del entorno Pipenv.
+PIPENV_PYTHON="$(pipenv --py 2>/dev/null || true)"
+if [[ -z "$PIPENV_PYTHON" || ! -x "$PIPENV_PYTHON" ]]; then
+  err "Pipenv no tiene un intérprete válido. Ejecutá: pipenv install --python 3.12"
+  exit 1
+fi
+ok "Python de Pipenv: $($PIPENV_PYTHON -V)"
+
 # Instalar dependencias en entorno de pipenv usando requirements.txt
 info "Instalando dependencias desde requirements.txt..."
 pipenv install -r requirements.txt
@@ -81,6 +90,6 @@ ok "Dependencias listas."
 
 # Ejecutar la app
 printf "\n\033[33mPresione Ctrl+C para detener la app\033[0m\n\n"
-pipenv run python3 main.py
+pipenv run python main.py
 
 printf "\n\033[33mApp detenida.\033[0m\n"
