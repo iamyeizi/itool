@@ -6,6 +6,7 @@ import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from logging.handlers import RotatingFileHandler
 from queue import Empty, Queue
 from functools import partial
 import platform
@@ -39,12 +40,37 @@ except Exception:
     # Fallback al archivo en el cwd si no se puede crear la carpeta
     log_file = 'itool.log'
 
-logging.basicConfig(
-    filename=log_file,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='a'
+
+def _redact_legacy_filter_entries(log_path):
+    """Elimina el único formato histórico que guardaba texto libre del buscador."""
+    try:
+        with open(log_path, encoding='utf-8') as log_stream:
+            log_lines = log_stream.readlines()
+        safe_lines = [line for line in log_lines if 'Aplicando filtro:' not in line]
+        if len(safe_lines) == len(log_lines):
+            return
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            encoding='utf-8',
+            dir=os.path.dirname(log_path) or '.',
+            delete=False,
+        ) as temporary_log:
+            temporary_log.writelines(safe_lines)
+            temporary_path = temporary_log.name
+        os.replace(temporary_path, log_path)
+    except OSError:
+        pass
+
+
+_redact_legacy_filter_entries(log_file)
+file_handler = RotatingFileHandler(
+    log_file,
+    maxBytes=1_000_000,
+    backupCount=2,
+    encoding='utf-8',
 )
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.basicConfig(level=logging.INFO, handlers=[file_handler])
 
 # También mostrar logs en consola
 console_handler = logging.StreamHandler()
@@ -570,7 +596,7 @@ class IToolApp(tk.Tk):
             self.update_grid_display(from_sort=True)
 
         except Exception as e:
-            logging.error(f"Error al ordenar por {column}: {e}")
+            logging.error("Error al ordenar por %s (%s)", column, type(e).__name__)
 
     def _sort_records(self, records):
         """Aplica el orden elegido sin cambiar su dirección."""
@@ -603,7 +629,6 @@ class IToolApp(tk.Tk):
             return
 
         self.last_search_query = query
-        logging.info(f"Aplicando filtro: '{query}'")
         if not query:
             filtered_list = self.pc_list.copy()
         else:
@@ -618,7 +643,7 @@ class IToolApp(tk.Tk):
         if visible_row_ids == self.visible_row_ids:
             return
 
-        logging.debug(f"Resultados del filtro: {len(filtered_list)} PCs")
+        logging.info("Filtro aplicado: %s resultados", len(filtered_list))
         self.update_grid_display()
         self._schedule_network_checks(enqueue=False)
         self._refresh_status()
@@ -821,7 +846,7 @@ class IToolApp(tk.Tk):
             return
         ip = pc["ip"]
         if self.system == 'windows':
-            logging.info(f"Conectando normalmente a {ip} (Windows)")
+            logging.info("Iniciando conexión RDP en Windows")
             usuario_rdp = normalize_rdp_username(pc["usuario"])
             # Guarda las credenciales en el Administrador de Credenciales de Windows
             try:
@@ -893,7 +918,7 @@ class IToolApp(tk.Tk):
             if not rdp_client:
                 logging.warning("No se encontró cliente RDP (instala xfreerdp o remmina)")
                 return
-            logging.info(f"Conectando a {ip} con {rdp_client} (Linux)")
+            logging.info("Iniciando conexión RDP en Linux con %s", rdp_client)
             if 'xfreerdp' in rdp_client:
                 comando = [rdp_client, f"/v:{ip}", f"/u:{pc['usuario']}", f"/p:{pc['contrasenia']}", '/cert:ignore']
             elif 'remmina' in rdp_client:
@@ -904,7 +929,7 @@ class IToolApp(tk.Tk):
             try:
                 subprocess.Popen(comando)
             except Exception as e:
-                logging.error(f"Error iniciando cliente RDP Linux: {e}")
+                logging.error("Error iniciando cliente RDP Linux (%s)", type(e).__name__)
 
     def connect_ssh(self, pc):
         if not pc or not pc.get('ip', ''):
@@ -965,7 +990,7 @@ del "%~f0"
                 try:
                     subprocess.Popen(['ssh', f'{usuario}@{ip}', '-p', str(current_ssh_port)])
                 except Exception as e:
-                    logging.error(f"No se pudo lanzar SSH: {e}")
+                    logging.error("No se pudo lanzar SSH (%s)", type(e).__name__)
 
     # ---------------- Utilidades específicas de plataforma ---------------- #
     def _get_linux_rdp_client(self):
