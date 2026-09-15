@@ -108,6 +108,7 @@ class IToolApp(tk.Tk):
         self.last_sheet_update = None
         self.spinner_index = 0
         self.copy_notice = None
+        self.copy_menu = None
         self.column_sync_timer = None
 
         # Cache para resultados de ping y puertos
@@ -276,7 +277,9 @@ class IToolApp(tk.Tk):
 
     def _show_copy_menu(self, widget, pc):
         """Muestra acciones de copiado solo cuando el usuario las solicita."""
+        self._dismiss_copy_menu()
         menu = tk.Menu(self, tearoff=False)
+        self.copy_menu = menu
         copy_fields = (
             ('Copiar IP', 'ip'),
             ('Copiar usuario', 'usuario'),
@@ -289,13 +292,23 @@ class IToolApp(tk.Tk):
                 command=partial(self._copy_pc_field, dict(pc), field_name, label),
                 state='normal' if value else 'disabled',
             )
+        menu.bind('<FocusOut>', lambda _event: self.after(0, self._dismiss_copy_menu))
+        menu.bind('<Escape>', lambda _event: self._dismiss_copy_menu())
         try:
             menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
         finally:
             menu.grab_release()
 
     def _copy_pc_field(self, pc, field_name, label):
+        self._dismiss_copy_menu()
         self._copy_to_clipboard(value_for_copy(pc, field_name), label)
+
+    def _dismiss_copy_menu(self):
+        menu = self.copy_menu
+        self.copy_menu = None
+        if menu is not None and menu.winfo_exists():
+            menu.unpost()
+            menu.destroy()
 
     def _copy_to_clipboard(self, value, label):
         if not value:
