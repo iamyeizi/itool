@@ -382,8 +382,7 @@ class iToolApp(tk.Tk):
         search_entry.bind('<KeyRelease>', self.on_search_change)
         search_entry.bind('<Return>', lambda e: self.apply_filter())
         search_entry.bind('<Escape>', lambda e: self.clear_filter())
-        tk.Button(search_frame, text="🔍", command=self.apply_filter).pack(side='left', padx=2)
-        tk.Button(search_frame, text="Limpiar", command=self.clear_filter).pack(side='left', padx=2)
+        tk.Button(search_frame, text="🗑", command=self.clear_filter).pack(side='left', padx=2)
         tk.Button(search_frame, text="🔄", command=self.refresh_data).pack(side='left', padx=2)
 
         # Frame para headers (FIJO)
