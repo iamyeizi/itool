@@ -227,15 +227,15 @@ class IToolApp(tk.Tk):
         tk.Label(status_frame, textvariable=self.spinner_var, width=2, anchor='w').pack(side='left')
         tk.Label(status_frame, textvariable=self.status_var, anchor='w').pack(side='left')
 
-        # Frame para headers (FIJO)
-        self.headers_frame = tk.Frame(main_frame, bg='lightgray')
-        self.headers_frame.pack(fill='x', pady=(0, 2), expand=False)
-
-        # Canvas con scroll para el grid (SCROLLEABLE)
+        # Encabezado y grilla comparten el mismo contenedor: así sus columnas
+        # terminan antes de la barra de scroll y quedan perfectamente alineadas.
         container = tk.Frame(main_frame)
         container.pack(fill='both', expand=True)
-        container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
+        container.grid_rowconfigure(1, weight=1)
+
+        self.headers_frame = tk.Frame(container, bg='lightgray')
+        self.headers_frame.grid(row=0, column=0, sticky='ew', pady=(0, 2))
 
         self.canvas = tk.Canvas(container, borderwidth=0)
         self.scrollbar = tk.Scrollbar(
@@ -254,10 +254,8 @@ class IToolApp(tk.Tk):
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.bind('<Configure>', self._resize_grid_to_canvas)
 
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.scrollbar.grid(row=0, column=1, sticky="ns")
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.scrollbar.grid(row=1, column=1, sticky="ns")
 
         # Bind para scroll con rueda del mouse
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
