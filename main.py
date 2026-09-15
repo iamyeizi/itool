@@ -62,7 +62,7 @@ gc = gspread.authorize(CREDS)
 sheet = gc.open('bd_pcs').sheet1  # Cambia por el nombre de tu sheet
 
 # --- Variables globales ---
-ssh_port = 49151
+SSH_PORTS = (22, 49151, 4402, 16166, 2222)
 
 # --- Optimización de la lectura de Google Sheets ---
 def get_pc_list():
@@ -235,6 +235,17 @@ async def async_is_port_open(ip, port):
             logging.debug(f"Error al verificar el puerto {port} en {ip}: {e}")
             return False
 
+
+async def async_get_open_ssh_port(ip):
+    """Devuelve el primer puerto SSH disponible según el orden configurado."""
+    if not ip or not is_valid_ip(ip):
+        return None
+
+    results = await asyncio.gather(
+        *(async_is_port_open(ip, port) for port in SSH_PORTS)
+    )
+    return next((port for port, is_open in zip(SSH_PORTS, results) if is_open), None)
+
 async def update_ssh_buttons_async(buttons, app_instance):
     """Actualiza los botones SSH según la disponibilidad del puerto."""
     if not buttons:
@@ -246,18 +257,12 @@ async def update_ssh_buttons_async(buttons, app_instance):
 
     for button, ip in buttons:
         if not ip:
-            cached_results.append((button, False))
+            cached_results.append((button, None))
         elif app_instance.is_cache_valid(ip) and ip in app_instance.ssh_port_cache:
             # Usar resultado del cache
             cached_results.append((button, app_instance.ssh_port_cache[ip]))
         else:
-            if ip == "192.168.3.220" or ip == "192.168.3.143" or ip == "192.168.3.235":
-                current_ssh_port = 22
-            elif ip == "192.168.3.53":
-                current_ssh_port = 16166
-            else:
-                current_ssh_port = ssh_port
-            tasks.append((button, ip, async_is_port_open(ip, current_ssh_port)))
+            tasks.append((button, ip, async_get_open_ssh_port(ip)))
 
     # Ejecutar solo las verificaciones necesarias
     if tasks:
@@ -268,10 +273,10 @@ async def update_ssh_buttons_async(buttons, app_instance):
             cached_results.append((button, result))
 
     # Aplicar todos los resultados
-    for button, port_open in cached_results:
+    for button, open_port in cached_results:
         if not button.winfo_exists():  # Verificar que el widget aún existe
             continue
-        if port_open:
+        if open_port:
             button.config(state="normal", text="SSH")
         else:
             button.config(state="disabled", text="✗")
@@ -307,21 +312,10 @@ async def update_rdp_buttons_async(buttons, app_instance):
     for button, port_open in cached_results:
         if not button.winfo_exists():  # Verificar que el widget aún existe
             continue
-        # Solo habilitar si el puerto está abierto
         if port_open:
-            button.config(state="normal")
-            # Restaurar texto original según el botón
-            if "Mirroring" in button.cget('text') or button.cget('text') == "✗":
-                button.config(text="Mirroring")
-            elif "RDP" in button.cget('text') or button.cget('text') == "✗":
-                button.config(text="RDP")
+            button.config(state="normal", text="RDP")
         else:
-            button.config(state="disabled")
-            # Agregar ✗ según el tipo de botón
-            if "Mirroring" in button.cget('text') or button.cget('text') == "✗":
-                button.config(text="✗")
-            elif "RDP" in button.cget('text') or button.cget('text') == "✗":
-                button.config(text="✗")
+            button.config(state="disabled", text="✗")
 
 class iToolApp(tk.Tk):
     def __init__(self):
@@ -346,7 +340,7 @@ class iToolApp(tk.Tk):
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
-        self.ssh_port_cache = {}   # IP -> bool (port ssh_port)
+        self.ssh_port_cache = {}   # IP -> puerto SSH disponible o None
         self.rdp_port_cache = {}   # IP -> bool (port 3389)
         self.cache_timeout = 30    # Segundos antes de invalidar cache
         self.last_check_time = {}  # IP -> timestamp
@@ -501,8 +495,8 @@ class iToolApp(tk.Tk):
         # Limpiar headers existentes
         for widget in self.headers_frame.winfo_children():
             widget.destroy()
-        headers = ["Titular", "Host", "IP", "Ping", "Mirroring", "RDP", "SSH"]
-        header_keys = ["titular", "hostname", "ip", "", "", "", ""]  # Keys para ordenamiento
+        headers = ["Titular", "IP", "Ping", "RDP", "SSH"]
+        header_keys = ["titular", "ip", "", "", ""]  # Keys para ordenamiento
 
         for col, (h, key) in enumerate(zip(headers, header_keys)):
             if key:  # Solo las columnas con datos son clickeables
@@ -583,8 +577,7 @@ class iToolApp(tk.Tk):
         else:
             self.filtered_list = [
                 pc for pc in self.pc_list
-                if query in str(pc.get('hostname', '')).lower()
-                or query in str(pc.get('ip', '')).lower()
+                if query in str(pc.get('ip', '')).lower()
                 or query in str(pc.get('titular', '')).lower()
             ]
         logging.debug(f"Resultados del filtro: {len(self.filtered_list)} PCs")
@@ -639,7 +632,7 @@ class iToolApp(tk.Tk):
 
     def calculate_column_widths(self):
         """Calcula el ancho óptimo para cada columna basado en su contenido"""
-        headers = ["Titular", "Host", "IP", "Ping", "Mirroring", "RDP", "SSH"]
+        headers = ["Titular", "IP", "Ping", "RDP", "SSH"]
         column_widths = []
 
         for col, header in enumerate(headers):
@@ -649,15 +642,12 @@ class iToolApp(tk.Tk):
             if col == 0:  # Titular
                 for pc in self.pc_list:  # Usar pc_list completa en lugar de filtered_list
                     max_length = max(max_length, len(str(pc.get('titular', ''))))
-            elif col == 1:  # Host
-                for pc in self.pc_list:
-                    max_length = max(max_length, len(str(pc.get('hostname', ''))))
-            elif col == 2:  # IP
+            elif col == 1:  # IP
                 for pc in self.pc_list:
                     max_length = max(max_length, len(str(pc.get('ip', ''))))
-            elif col == 3:  # Ping (solo el LED)
+            elif col == 2:  # Ping (solo el LED)
                 max_length = 4  # Ancho fijo para el LED
-            elif col in [4, 5, 6]:  # Botones
+            elif col in [3, 4]:  # Botones
                 max_length = max(max_length, 8)  # Ancho mínimo para botones
 
             # Convertir caracteres a píxeles (aproximado: 1 carácter = 8 píxeles)
@@ -699,37 +689,25 @@ class iToolApp(tk.Tk):
             # Titular
             tk.Label(self.scrollable_frame, text=pc.get('titular', ''), anchor='w',
                     bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=0, padx=2, sticky='nsew')
-            # Host
-            tk.Label(self.scrollable_frame, text=pc.get('hostname', ''), anchor='w',
-                    bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=1, padx=2, sticky='nsew')
             # IP
             tk.Label(self.scrollable_frame, text=pc.get('ip', ''), anchor='w',
-                    bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=2, padx=2, sticky='nsew')
+                    bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=1, padx=2, sticky='nsew')
             # LED Ping
             led = tk.Label(self.scrollable_frame, text='●', fg='grey', font=('Arial', 12),
                           bg='white' if row % 2 == 0 else '#f0f0f0')
-            led.grid(row=row, column=3, padx=2, sticky='nsew')
+            led.grid(row=row, column=2, padx=2, sticky='nsew')
             self.leds.append((led, pc.get('ip', '')))
-            # Botón Mirroring
-            btn_espejo = tk.Button(self.scrollable_frame, text='Mirroring',
-                                   command=partial(self.connect_remoto, pc.get('ip', '')))
-            btn_espejo.grid(row=row, column=4, padx=2, sticky='nsew')
-            self.rdp_buttons.append((btn_espejo, pc.get('ip', '')))  # Trackear para verificar puerto
-            # En Linux no existe soporte directo para shadow con mstsc; deshabilitar si no Windows
-            if self.system != 'windows':
-                btn_espejo.config(state='disabled', text='N/A')
-
             # Botón RDP
             btn_normal = tk.Button(self.scrollable_frame, text='RDP',
                                    command=partial(self.connect_login_remoto, pc))
-            btn_normal.grid(row=row, column=5, padx=2, sticky='nsew')
+            btn_normal.grid(row=row, column=3, padx=2, sticky='nsew')
             self.rdp_buttons.append((btn_normal, pc.get('ip', '')))  # Trackear para verificar puerto
             if self.system != 'windows' and not self._get_linux_rdp_client():
                 btn_normal.config(state='disabled', text='N/A')
             # Botón SSH
             btn_ssh = tk.Button(self.scrollable_frame, text='✗', state='disabled',
                                  command=partial(self.connect_ssh, pc))
-            btn_ssh.grid(row=row, column=6, padx=2, sticky='nsew')
+            btn_ssh.grid(row=row, column=4, padx=2, sticky='nsew')
             self.ssh_buttons.append((btn_ssh, pc.get('ip', '')))
 
             # Configurar el peso de cada fila
@@ -784,43 +762,6 @@ class iToolApp(tk.Tk):
             except Exception as e:
                 logging.error(f"Error al actualizar LEDs: {e}")
         self.after(10 * 1000, self.update_leds)
-
-    def connect_remoto(self, ip):
-        """Ejecuta mstsc en modo espejo usando la IP"""
-        if not ip:
-            logging.warning("No se puede conectar: IP vacía")
-            return
-        if self.system == 'windows':
-            logging.info(f"Conectando en modo espejo a {ip} (Windows)")
-            comando = [
-                'mstsc',
-                '/shadow:1',
-                f'/v:{ip}',
-                '/control',
-                '/noConsentPrompt'
-            ]
-            try:
-                subprocess.Popen(comando)
-            except FileNotFoundError:
-                logging.error("mstsc no encontrado en el PATH")
-        else:
-            # No shadow equivalente simple en Linux con xfreerdp sin identificar session ID
-            # Se ofrece conexión estándar si existe cliente RDP
-            rdp_client = self._get_linux_rdp_client()
-            if not rdp_client:
-                logging.warning("Cliente RDP no disponible en Linux (instala xfreerdp o remmina)")
-                return
-            logging.info(f"Conectando (modo simple) a {ip} usando {rdp_client}")
-            if 'xfreerdp' in rdp_client:
-                comando = [rdp_client, f"/v:{ip}", '/cert:ignore']
-            elif 'remmina' in rdp_client:
-                comando = [rdp_client, f"--conn=rdp://{ip}"]
-            else:
-                comando = [rdp_client, ip]
-            try:
-                subprocess.Popen(comando)
-            except Exception as e:
-                logging.error(f"Error lanzando cliente RDP Linux: {e}")
 
     def connect_login_remoto(self, pc):
         """Conecta usando credenciales del PC"""
@@ -882,7 +823,7 @@ class iToolApp(tk.Tk):
                 new_lines.append('prompt for credentials:i:0\r\n')
                 new_lines.append('promptcredentialonce:i:1\r\n')
 
-            temp_rdp = f'{pc.get("hostname", "pc")}.rdp'
+            temp_rdp = f'rdp_{ip.replace(".", "_")}.rdp'
             with open(temp_rdp, 'w', encoding='utf-16') as f:
                 f.writelines(new_lines)
 
@@ -922,13 +863,8 @@ class iToolApp(tk.Tk):
         usuario = pc.get('usuario', '')
         contrasenia = pc.get('contrasenia', '')
 
-        # Determinar el puerto SSH según la IP
-        if ip == "192.168.3.220" or ip == "192.168.3.143" or ip == "192.168.3.235":
-            current_ssh_port = 22
-        elif ip == "192.168.3.53":
-            current_ssh_port = 16166
-        else:
-            current_ssh_port = ssh_port
+        # Usar el puerto detectado; 22 es el fallback antes de una comprobación.
+        current_ssh_port = self.ssh_port_cache.get(ip) or SSH_PORTS[0]
 
         if self.system == 'windows':
             unique_id = uuid.uuid4().hex[:8]
