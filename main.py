@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import ipaddress
 import socket
 import logging
+import json
 from queue import Empty, Queue
 from functools import partial
 import platform
@@ -67,6 +68,47 @@ NETWORK_TIMEOUT_SECONDS = 0.5
 NETWORK_CACHE_SECONDS = 30
 NETWORK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix='itool-net')
 DATA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='itool-data')
+
+
+def _network_cache_path():
+    if platform.system().lower() == 'windows':
+        state_dir = os.path.join(os.getenv('LOCALAPPDATA', os.path.expanduser('~')), 'iTool')
+    else:
+        state_dir = os.path.join(os.getenv('XDG_STATE_HOME', os.path.expanduser('~/.local/state')), 'itool')
+    return os.path.join(state_dir, 'network_cache.json')
+
+
+def load_ssh_port_cache():
+    """Carga únicamente puertos SSH válidos previamente detectados."""
+    try:
+        with open(_network_cache_path(), encoding='utf-8') as cache_file:
+            cached_ports = json.load(cache_file).get('ssh_ports', {})
+        return {
+            ip: port
+            for ip, port in cached_ports.items()
+            if is_valid_ip(ip) and port in SSH_PORTS
+        }
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_ssh_port_cache(ssh_port_cache):
+    """Guarda de forma atómica los puertos SSH que tuvieron éxito."""
+    cache_path = _network_cache_path()
+    state_dir = os.path.dirname(cache_path)
+    valid_ports = {
+        ip: port
+        for ip, port in ssh_port_cache.items()
+        if is_valid_ip(ip) and port in SSH_PORTS
+    }
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        temp_path = f'{cache_path}.tmp'
+        with open(temp_path, 'w', encoding='utf-8') as cache_file:
+            json.dump({'ssh_ports': valid_ports}, cache_file, sort_keys=True)
+        os.replace(temp_path, cache_path)
+    except OSError as error:
+        logging.debug(f"No se pudo guardar el cache de puertos SSH: {error}")
 
 # --- Optimización de la lectura de Google Sheets ---
 def get_pc_list():
@@ -201,12 +243,14 @@ def is_port_open(ip, port):
         return False
 
 
-def get_open_ssh_port(ip):
-    """Devuelve el primer puerto SSH disponible según el orden configurado."""
+def get_open_ssh_port(ip, preferred_port=None):
+    """Devuelve un puerto SSH, probando primero el último que funcionó."""
     if not ip or not is_valid_ip(ip):
         return None
 
-    return next((port for port in SSH_PORTS if is_port_open(ip, port)), None)
+    ports = ((preferred_port,) if preferred_port in SSH_PORTS else ())
+    ports += tuple(port for port in SSH_PORTS if port != preferred_port)
+    return next((port for port in ports if is_port_open(ip, port)), None)
 
 class iToolApp(tk.Tk):
     def __init__(self):
@@ -237,10 +281,12 @@ class iToolApp(tk.Tk):
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
-        self.ssh_port_cache = {}   # IP -> puerto SSH disponible o None
+        self.ssh_port_cache = load_ssh_port_cache()
         self.rdp_port_cache = {}   # IP -> bool (port 3389)
         self.cache_timeout = NETWORK_CACHE_SECONDS
         self.last_check_time = {}  # (tipo, IP) -> timestamp
+        self.ssh_cache_dirty = False
+        self.ssh_cache_save_timer = None
 
         # Hacer que la ventana no sea redimensionable
         self.resizable(False, False)
@@ -407,7 +453,12 @@ class iToolApp(tk.Tk):
                 continue
             self._submit_check('ping', ip, check_ping)
             self._submit_check('rdp', ip, lambda target: is_port_open(target, 3389))
-            self._submit_check('ssh', ip, get_open_ssh_port)
+            preferred_port = self.ssh_port_cache.get(ip)
+            self._submit_check(
+                'ssh',
+                ip,
+                lambda target, preferred=preferred_port: get_open_ssh_port(target, preferred),
+            )
 
     def _periodic_network_refresh(self):
         self._schedule_network_checks()
@@ -453,8 +504,19 @@ class iToolApp(tk.Tk):
         elif check_type == 'rdp':
             self.rdp_port_cache[ip] = bool(result)
         else:
+            previous_port = self.ssh_port_cache.get(ip)
             self.ssh_port_cache[ip] = result
+            if result and result != previous_port:
+                self.ssh_cache_dirty = True
+                if self.ssh_cache_save_timer is None:
+                    self.ssh_cache_save_timer = self.after(1000, self._save_ssh_port_cache)
         self._update_widgets_for_ip(check_type, ip, result)
+
+    def _save_ssh_port_cache(self):
+        self.ssh_cache_save_timer = None
+        if self.ssh_cache_dirty:
+            save_ssh_port_cache(self.ssh_port_cache)
+            self.ssh_cache_dirty = False
 
     def _update_widgets_for_ip(self, check_type, ip, result):
         if check_type == 'ping':

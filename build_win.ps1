@@ -1,6 +1,7 @@
 param(
   [switch]$Log,
   [switch]$Debug,
+  [switch]$OneFile,
   [switch]$NoHold
 )
 $ErrorActionPreference = 'Stop'
@@ -113,18 +114,21 @@ AddDataIfExists (Join-Path $Root 'utils/icon.ico') 'utils'
 AddDataIfExists (Join-Path $Root 'utils/icon.png') 'utils'
 
 $pyi = Join-Path $Venv 'Scripts/pyinstaller.exe'
-$baseArgs = @('--noconfirm', '--onefile', '--windowed', '--clean', '--name', 'itool')
+$packageMode = if ($OneFile) { '--onefile' } else { '--onedir' }
+$baseArgs = @('--noconfirm', $packageMode, '--windowed', '--clean', '--name', 'itool')
 if ($icon) { $baseArgs += @('--icon', $icon) } else { Write-Err 'Advertencia: no se encontró ícono (.ico/.png); el EXE usará el ícono por defecto.' }
 $baseArgs += $addArgs
 $baseArgs += (Join-Path $Root 'main.py')
 
-  Write-Info 'Construyendo EXE...'
+  Write-Info "Construyendo EXE ($packageMode)..."
   # Limpiar artefactos anteriores
   try {
     $buildDir = Join-Path $Root 'build'
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
     $oldExe = Join-Path (Join-Path $Root 'dist') 'itool.exe'
     if (Test-Path $oldExe) { Remove-Item -Force $oldExe }
+    $oldOneDir = Join-Path (Join-Path $Root 'dist') 'itool'
+    if (Test-Path $oldOneDir) { Remove-Item -Recurse -Force $oldOneDir }
   } catch { Write-Info 'No se pudo limpiar todos los artefactos, continúo...' }
   if ($Debug) { $baseArgs += '--log-level=DEBUG' }
   $prevEap = $ErrorActionPreference
@@ -150,8 +154,9 @@ $baseArgs += (Join-Path $Root 'main.py')
     throw "PyInstaller fallo ($LASTEXITCODE)"
   }
 
-  Write-Info 'Listo. EXE generado en dist\itool.exe'
-  Write-Info 'Podés crear un acceso directo a dist\itool.exe y fijarlo a la barra.'
+  $outputExe = if ($OneFile) { 'dist\itool.exe' } else { 'dist\itool\itool.exe' }
+  Write-Info "Listo. EXE generado en $outputExe"
+  Write-Info "Podés crear un acceso directo a $outputExe y fijarlo a la barra."
 }
 catch {
   $hadError = $true
