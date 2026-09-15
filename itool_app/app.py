@@ -749,9 +749,9 @@ class IToolApp(tk.Tk):
 
         # Crear cada celda directamente en scrollable_frame para alinear columnas
         for row, pc in enumerate(self.filtered_list):
-            # Titular
+            # TITULAR
             tk.Label(self.scrollable_frame, text=pc.get('titular', ''), anchor='w',
-                    bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=0, padx=2, sticky='nsew')
+                  bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=0, padx=2, sticky='nsew')
             # IP
             tk.Label(self.scrollable_frame, text=pc.get('ip', ''), anchor='w',
                     bg='white' if row % 2 == 0 else '#f0f0f0').grid(row=row, column=1, padx=2, sticky='nsew')
