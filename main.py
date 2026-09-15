@@ -84,6 +84,20 @@ def is_valid_ip(ip):
     except ValueError:
         return False
 
+
+def rdp_username(usuario):
+    """Devuelve un usuario explícitamente local cuando no se indicó ámbito.
+
+    RDP interpreta ``EQUIPO\\usuario`` como una cuenta del equipo indicado.
+    Las credenciales simples de la planilla son cuentas locales del destino, por
+    lo que se convierten a ``.\\usuario``. Las cuentas de dominio y Microsoft
+    se preservan tal como fueron cargadas.
+    """
+    usuario = str(usuario).strip()
+    if "\\" in usuario or "@" in usuario:
+        return usuario
+    return f".\\{usuario}"
+
 # --- Clave de ordenamiento natural para IPs (IPv4) ---
 def ip_sort_key(value):
     """Devuelve una tupla numérica para ordenar IPs de forma natural.
@@ -816,12 +830,13 @@ class iToolApp(tk.Tk):
         ip = pc["ip"]
         if self.system == 'windows':
             logging.info(f"Conectando normalmente a {ip} (Windows)")
+            usuario_rdp = rdp_username(pc["usuario"])
             # Guarda las credenciales en el Administrador de Credenciales de Windows
             try:
                 subprocess.call([
                     'cmdkey',
                     f'/add:TERMSRV/{ip}',
-                    f'/user:{pc["usuario"]}',
+                    f'/user:{usuario_rdp}',
                     f'/pass:{pc["contrasenia"]}'
                 ])
             except FileNotFoundError:
@@ -853,7 +868,7 @@ class iToolApp(tk.Tk):
                 if line.strip().startswith('full address:s:'):
                     new_lines.append(f'full address:s:{ip}\r\n')
                 elif line.strip().startswith('username:s:'):
-                    new_lines.append(f'username:s:{pc["usuario"]}\r\n')
+                    new_lines.append(f'username:s:{usuario_rdp}\r\n')
                     username_set = True
                 elif line.strip().startswith('prompt for credentials:i:'):
                     new_lines.append('prompt for credentials:i:0\r\n')
@@ -863,7 +878,7 @@ class iToolApp(tk.Tk):
                     new_lines.append(line)
 
             if not username_set:
-                new_lines.append(f'username:s:{pc["usuario"]}\r\n')
+                new_lines.append(f'username:s:{usuario_rdp}\r\n')
                 new_lines.append('prompt for credentials:i:0\r\n')
                 new_lines.append('promptcredentialonce:i:1\r\n')
 
