@@ -8,11 +8,11 @@ import threading
 import subprocess
 import os
 import uuid
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import ipaddress
 import socket
 import logging
+from queue import Empty, Queue
 from functools import partial
 import platform
 import shutil
@@ -63,6 +63,10 @@ sheet = gc.open('bd_pcs').sheet1  # Cambia por el nombre de tu sheet
 
 # --- Variables globales ---
 SSH_PORTS = (22, 49151, 4402, 16166, 2222)
+NETWORK_TIMEOUT_SECONDS = 0.5
+NETWORK_CACHE_SECONDS = 30
+NETWORK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix='itool-net')
+DATA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='itool-data')
 
 # --- Optimización de la lectura de Google Sheets ---
 def get_pc_list():
@@ -152,170 +156,57 @@ def ip_vlan_host_sort_key(value):
     return (1, 0, 0)
 
 # --- Ping asincrónico con manejo de PCs sin IP ---
-async def async_ping(ip):
+def check_ping(ip):
     if not ip:
         return False
 
     if not is_valid_ip(ip):
         return False
 
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as executor:
-        try:
-            response = await loop.run_in_executor(executor, ping, ip, 1, 1)
-            return response.success()
-        except Exception as e:
-            logging.debug(f"Error al hacer ping a {ip}: {e}")
-            # Fallback en Linux sin privilegios para usar comando del sistema
-            if platform.system().lower() == 'linux':
-                try:
-                    proc = await loop.run_in_executor(
-                        executor,
-                        lambda: subprocess.run([
-                            'ping', '-c', '1', '-W', '1', ip
-                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    )
-                    return proc.returncode == 0
-                except Exception as e2:
-                    logging.debug(f"Fallback ping fallo para {ip}: {e2}")
-            return False
+    try:
+        return ping(ip, 1, 1).success()
+    except Exception as e:
+        logging.debug(f"Error al hacer ping a {ip}: {e}")
+        # Fallback en Linux sin privilegios para usar comando del sistema.
+        if platform.system().lower() == 'linux':
+            try:
+                proc = subprocess.run(
+                    ['ping', '-c', '1', '-W', '1', ip],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return proc.returncode == 0
+            except Exception as fallback_error:
+                logging.debug(f"Fallback ping fallo para {ip}: {fallback_error}")
+        return False
 
-async def update_leds_async(leds, app_instance):
-    if not leds:
-        return
-
-    # Separar IPs que necesitan ping de las que ya están en cache
-    tasks = []
-    cached_results = []
-
-    for led, ip in leds:
-        if not ip:
-            cached_results.append((led, False))
-        elif app_instance.is_cache_valid(ip) and ip in app_instance.ping_cache:
-            # Usar resultado del cache
-            cached_results.append((led, app_instance.ping_cache[ip]))
-        else:
-            # Necesita ping
-            tasks.append((led, ip, async_ping(ip)))
-
-    # Ejecutar solo los pings necesarios
-    if tasks:
-        ping_results = await asyncio.gather(*[task[2] for task in tasks])
-        for (led, ip, _), result in zip(tasks, ping_results):
-            app_instance.ping_cache[ip] = result
-            app_instance.update_cache_timestamp(ip)
-            cached_results.append((led, result))
-
-    # Aplicar todos los resultados
-    for led, online in cached_results:
-        if not led.winfo_exists():  # Verificar que el widget aún existe
-            continue
-        led.config(fg="green" if online else "red")
-
-async def async_is_port_open(ip, port):
-    """Verifica asincrónicamente si un puerto específico está abierto en una IP dada."""
+def is_port_open(ip, port):
+    """Verifica si un puerto específico está abierto en una IP dada."""
     if not ip or not is_valid_ip(ip):
         return False
 
     def check_port():
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(3)
+                s.settimeout(NETWORK_TIMEOUT_SECONDS)
                 result = s.connect_ex((ip, port))
                 return result == 0
         except Exception:
             return False
 
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as executor:
-        try:
-            result = await loop.run_in_executor(executor, check_port)
-            return result
-        except Exception as e:
-            logging.debug(f"Error al verificar el puerto {port} en {ip}: {e}")
-            return False
+    try:
+        return check_port()
+    except Exception as e:
+        logging.debug(f"Error al verificar el puerto {port} en {ip}: {e}")
+        return False
 
 
-async def async_get_open_ssh_port(ip):
+def get_open_ssh_port(ip):
     """Devuelve el primer puerto SSH disponible según el orden configurado."""
     if not ip or not is_valid_ip(ip):
         return None
 
-    results = await asyncio.gather(
-        *(async_is_port_open(ip, port) for port in SSH_PORTS)
-    )
-    return next((port for port, is_open in zip(SSH_PORTS, results) if is_open), None)
-
-async def update_ssh_buttons_async(buttons, app_instance):
-    """Actualiza los botones SSH según la disponibilidad del puerto."""
-    if not buttons:
-        return
-
-    # Separar botones que necesitan verificación de los que están en cache
-    tasks = []
-    cached_results = []
-
-    for button, ip in buttons:
-        if not ip:
-            cached_results.append((button, None))
-        elif app_instance.is_cache_valid(ip) and ip in app_instance.ssh_port_cache:
-            # Usar resultado del cache
-            cached_results.append((button, app_instance.ssh_port_cache[ip]))
-        else:
-            tasks.append((button, ip, async_get_open_ssh_port(ip)))
-
-    # Ejecutar solo las verificaciones necesarias
-    if tasks:
-        port_results = await asyncio.gather(*[task[2] for task in tasks])
-        for (button, ip, _), result in zip(tasks, port_results):
-            app_instance.ssh_port_cache[ip] = result
-            app_instance.update_cache_timestamp(ip)
-            cached_results.append((button, result))
-
-    # Aplicar todos los resultados
-    for button, open_port in cached_results:
-        if not button.winfo_exists():  # Verificar que el widget aún existe
-            continue
-        if open_port:
-            button.config(state="normal", text="SSH")
-        else:
-            button.config(state="disabled", text="✗")
-
-async def update_rdp_buttons_async(buttons, app_instance):
-    """Actualiza los botones RDP según la disponibilidad del puerto 3389."""
-    if not buttons:
-        return
-
-    # Separar botones que necesitan verificación de los que están en cache
-    tasks = []
-    cached_results = []
-
-    for button, ip in buttons:
-        if not ip:
-            cached_results.append((button, False))
-        elif app_instance.is_cache_valid(ip) and ip in app_instance.rdp_port_cache:
-            # Usar resultado del cache
-            cached_results.append((button, app_instance.rdp_port_cache[ip]))
-        else:
-            # Necesita verificación
-            tasks.append((button, ip, async_is_port_open(ip, 3389)))
-
-    # Ejecutar solo las verificaciones necesarias
-    if tasks:
-        port_results = await asyncio.gather(*[task[2] for task in tasks])
-        for (button, ip, _), result in zip(tasks, port_results):
-            app_instance.rdp_port_cache[ip] = result
-            app_instance.update_cache_timestamp(ip)
-            cached_results.append((button, result))
-
-    # Aplicar todos los resultados
-    for button, port_open in cached_results:
-        if not button.winfo_exists():  # Verificar que el widget aún existe
-            continue
-        if port_open:
-            button.config(state="normal", text="RDP")
-        else:
-            button.config(state="disabled", text="✗")
+    return next((port for port in SSH_PORTS if is_port_open(ip, port)), None)
 
 class iToolApp(tk.Tk):
     def __init__(self):
@@ -337,21 +228,28 @@ class iToolApp(tk.Tk):
         self.sort_column = None    # Columna actual de ordenamiento
         self.sort_ascending = True # Dirección del ordenamiento
         self.window_size_set = False  # Flag para evitar múltiples ajustes de ventana
+        self.search_index = {}
+        self.visible_row_ids = ()
+        self.last_search_query = None
+        self.ui_events = Queue()
+        self.pending_checks = set()
+        self.data_loading = False
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
         self.ssh_port_cache = {}   # IP -> puerto SSH disponible o None
         self.rdp_port_cache = {}   # IP -> bool (port 3389)
-        self.cache_timeout = 30    # Segundos antes de invalidar cache
-        self.last_check_time = {}  # IP -> timestamp
+        self.cache_timeout = NETWORK_CACHE_SECONDS
+        self.last_check_time = {}  # (tipo, IP) -> timestamp
 
         # Hacer que la ventana no sea redimensionable
         self.resizable(False, False)
 
         # Inicializar interfaz y datos
         self.create_widgets()
-        self.refresh_data()
-        self.update_leds()
+        self.after(50, self._drain_ui_events)
+        self.after(1, self.refresh_data)
+        self.after(self.cache_timeout * 1000, self._periodic_network_refresh)
 
     def _set_app_icon(self):
         """Configura el icono de la ventana según el sistema operativo.
@@ -478,17 +376,113 @@ class iToolApp(tk.Tk):
         # Crear headers fijos
         self.create_fixed_headers()
 
-    def is_cache_valid(self, ip):
-        """Verifica si el cache para una IP sigue siendo válido"""
+    def _is_cache_valid(self, check_type, ip):
+        """Verifica la vigencia de un resultado de red específico."""
         import time
-        if ip not in self.last_check_time:
-            return False
-        return time.time() - self.last_check_time[ip] < self.cache_timeout
+        timestamp = self.last_check_time.get((check_type, ip))
+        return timestamp is not None and time.time() - timestamp < self.cache_timeout
 
-    def update_cache_timestamp(self, ip):
-        """Actualiza el timestamp del cache para una IP"""
+    def _submit_check(self, check_type, ip, worker):
+        key = (check_type, ip)
+        if key in self.pending_checks or self._is_cache_valid(check_type, ip):
+            return
+
+        self.pending_checks.add(key)
+        future = NETWORK_EXECUTOR.submit(worker, ip)
+
+        def publish_result(completed_future):
+            try:
+                result = completed_future.result()
+            except Exception as error:
+                logging.debug(f"Fallo la comprobación {check_type} para {ip}: {error}")
+                result = None if check_type == 'ssh' else False
+            self.ui_events.put(('network', check_type, ip, result))
+
+        future.add_done_callback(publish_result)
+
+    def _schedule_network_checks(self):
+        """Encola chequeos limitados sin bloquear el hilo de la interfaz."""
+        for ip in {str(pc.get('ip', '')).strip() for pc in self.pc_list}:
+            if not is_valid_ip(ip):
+                continue
+            self._submit_check('ping', ip, check_ping)
+            self._submit_check('rdp', ip, lambda target: is_port_open(target, 3389))
+            self._submit_check('ssh', ip, get_open_ssh_port)
+
+    def _periodic_network_refresh(self):
+        self._schedule_network_checks()
+        self.after(self.cache_timeout * 1000, self._periodic_network_refresh)
+
+    def _drain_ui_events(self):
+        """Aplica resultados en el hilo de Tkinter, nunca desde un worker."""
+        try:
+            while True:
+                event = self.ui_events.get_nowait()
+                if event[0] == 'data':
+                    self._apply_data(event[1])
+                else:
+                    _, check_type, ip, result = event
+                    self._apply_network_result(check_type, ip, result)
+        except Empty:
+            pass
+        self.after(50, self._drain_ui_events)
+
+    def _apply_data(self, data):
+        self.data_loading = False
+        self.pc_list = data
+        self.filtered_list = data.copy()
+        self.search_index = {
+            id(pc): f"{pc.get('ip', '')} {pc.get('titular', '')}".casefold()
+            for pc in data
+        }
+        self.visible_row_ids = ()
+        self.last_search_query = None
+        logging.debug(f"Datos cargados: {len(self.pc_list)} PCs")
+        self.create_grid()
+        if not self.window_size_set:
+            self.adjust_window_to_content()
+            self.window_size_set = True
+        self._schedule_network_checks()
+
+    def _apply_network_result(self, check_type, ip, result):
         import time
-        self.last_check_time[ip] = time.time()
+        self.pending_checks.discard((check_type, ip))
+        self.last_check_time[(check_type, ip)] = time.time()
+        if check_type == 'ping':
+            self.ping_cache[ip] = bool(result)
+        elif check_type == 'rdp':
+            self.rdp_port_cache[ip] = bool(result)
+        else:
+            self.ssh_port_cache[ip] = result
+        self._update_widgets_for_ip(check_type, ip, result)
+
+    def _update_widgets_for_ip(self, check_type, ip, result):
+        if check_type == 'ping':
+            for led, led_ip in self.leds:
+                if led_ip == ip and led.winfo_exists():
+                    led.config(fg='green' if result else 'red')
+        elif check_type == 'rdp':
+            for button, button_ip in self.rdp_buttons:
+                if button_ip == ip and button.winfo_exists():
+                    button.config(
+                        state='normal' if result else 'disabled',
+                        text='RDP' if result else '✗',
+                    )
+        else:
+            for button, button_ip in self.ssh_buttons:
+                if button_ip == ip and button.winfo_exists():
+                    button.config(
+                        state='normal' if result else 'disabled',
+                        text='SSH' if result else '✗',
+                    )
+
+    def _apply_cached_network_statuses(self):
+        for ip, status in self.ping_cache.items():
+            self._update_widgets_for_ip('ping', ip, status)
+        for ip, status in self.rdp_port_cache.items():
+            self._update_widgets_for_ip('rdp', ip, status)
+        for ip, port in self.ssh_port_cache.items():
+            self._update_widgets_for_ip('ssh', ip, port)
 
     def create_fixed_headers(self):
         """Crea los headers fijos que no se mueven al hacer scroll"""
@@ -563,45 +557,59 @@ class iToolApp(tk.Tk):
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
     def on_search_change(self, event):
-        """Implementa debounce para el filtro"""
+        """Filtra con una espera breve sin reconstruir la UI innecesariamente."""
         if self.filter_timer:
             self.after_cancel(self.filter_timer)
-        self.filter_timer = self.after(500, self.apply_filter)  # Espera 500ms antes de filtrar
+        self.filter_timer = self.after(150, self.apply_filter)
 
     def apply_filter(self):
-        """Aplica el filtro después del debounce"""
-        query = self.search_var.get().lower().strip()
+        """Aplica el filtro usando el índice precalculado de cada PC."""
+        self.filter_timer = None
+        query = self.search_var.get().casefold().strip()
+        if query == self.last_search_query:
+            return
+
+        self.last_search_query = query
         logging.info(f"Aplicando filtro: '{query}'")
         if not query:
-            self.filtered_list = self.pc_list.copy()
+            filtered_list = self.pc_list.copy()
         else:
-            self.filtered_list = [
+            filtered_list = [
                 pc for pc in self.pc_list
-                if query in str(pc.get('ip', '')).lower()
-                or query in str(pc.get('titular', '')).lower()
+                if query in self.search_index.get(id(pc), '')
             ]
-        logging.debug(f"Resultados del filtro: {len(self.filtered_list)} PCs")
+
+        visible_row_ids = tuple(id(pc) for pc in filtered_list)
+        self.filtered_list = filtered_list
+        if visible_row_ids == self.visible_row_ids:
+            return
+
+        logging.debug(f"Resultados del filtro: {len(filtered_list)} PCs")
         self.update_grid_display()
 
     def refresh_data(self):
+        if self.data_loading:
+            return
+
         logging.info("Refrescando datos desde Google Sheets")
-        try:
-            self.pc_list = get_pc_list()
-            self.filtered_list = self.pc_list.copy()
-            logging.debug(f"Datos cargados: {len(self.pc_list)} PCs")
-            self.create_grid()
-            # Solo ajustar ventana la primera vez o cuando se refresca completamente
-            if not self.window_size_set:
-                self.adjust_window_to_content()
-                self.window_size_set = True
-        except Exception as e:
-            logging.error(f"Error al refrescar datos: {e}")
+        self.data_loading = True
+        future = DATA_EXECUTOR.submit(get_pc_list)
+
+        def publish_data(completed_future):
+            try:
+                data = completed_future.result()
+            except Exception as error:
+                logging.error(f"Error al refrescar datos: {error}")
+                data = []
+            self.ui_events.put(('data', data))
+
+        future.add_done_callback(publish_data)
 
     def clear_filter(self):
         logging.info("Limpiando filtro")
         self.search_var.set("")
-        self.filtered_list = self.pc_list.copy()
-        self.update_grid_display()
+        self.last_search_query = None
+        self.apply_filter()
 
     def adjust_window_to_content(self):
         """Ajusta la ventana al contenido - ancho fijo basado en contenido, alto para máximo 20 filas"""
@@ -676,6 +684,7 @@ class iToolApp(tk.Tk):
     def update_grid_display(self, from_sort: bool = False):
         """Actualiza la visualización del grid alineada con los headers"""
         logging.info("Actualizando visualización del grid")
+        self.visible_row_ids = tuple(id(pc) for pc in self.filtered_list)
         # Limpiar todas las filas existentes
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
@@ -698,7 +707,7 @@ class iToolApp(tk.Tk):
             led.grid(row=row, column=2, padx=2, sticky='nsew')
             self.leds.append((led, pc.get('ip', '')))
             # Botón RDP
-            btn_normal = tk.Button(self.scrollable_frame, text='RDP',
+            btn_normal = tk.Button(self.scrollable_frame, text='RDP', state='disabled',
                                    command=partial(self.connect_login_remoto, pc))
             btn_normal.grid(row=row, column=3, padx=2, sticky='nsew')
             self.rdp_buttons.append((btn_normal, pc.get('ip', '')))  # Trackear para verificar puerto
@@ -713,15 +722,8 @@ class iToolApp(tk.Tk):
             # Configurar el peso de cada fila
             self.scrollable_frame.grid_rowconfigure(row, weight=1)
 
-        # Actualizar botones SSH y RDP en segundo plano (omitir si es solo reordenamiento)
-        if not from_sort:
-            if self.ssh_buttons:
-                threading.Thread(target=self.update_ssh_buttons_threaded, daemon=True).start()
-            if self.rdp_buttons:
-                threading.Thread(target=self.update_rdp_buttons_threaded, daemon=True).start()
-
-            # Solo sincronizar columnas, NO ajustar ventana en cada actualización
-            self.after(100, self.sync_column_widths)
+        self._apply_cached_network_statuses()
+        self.after(100, self.sync_column_widths)
 
     def create_grid(self):
         """Inicializa el grid básico"""
@@ -740,28 +742,6 @@ class iToolApp(tk.Tk):
 
         # Actualizar la visualización con las PCs
         self.update_grid_display()
-
-    def update_ssh_buttons_threaded(self):
-        """Actualiza botones SSH en un hilo separado"""
-        try:
-            asyncio.run(update_ssh_buttons_async(self.ssh_buttons, self))
-        except Exception as e:
-            logging.error(f"Error al actualizar botones SSH: {e}")
-
-    def update_rdp_buttons_threaded(self):
-        """Actualiza botones RDP en un hilo separado"""
-        try:
-            asyncio.run(update_rdp_buttons_async(self.rdp_buttons, self))
-        except Exception as e:
-            logging.error(f"Error al actualizar botones RDP: {e}")
-
-    def update_leds(self):
-        if self.leds:
-            try:
-                asyncio.run(update_leds_async(self.leds, self))
-            except Exception as e:
-                logging.error(f"Error al actualizar LEDs: {e}")
-        self.after(10 * 1000, self.update_leds)
 
     def connect_login_remoto(self, pc):
         """Conecta usando credenciales del PC"""
