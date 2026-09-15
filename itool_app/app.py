@@ -108,6 +108,7 @@ class IToolApp(tk.Tk):
         self.last_sheet_update = None
         self.spinner_index = 0
         self.copy_notice = None
+        self.column_sync_timer = None
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
@@ -261,6 +262,9 @@ class IToolApp(tk.Tk):
 
     def _resize_grid_to_canvas(self, event):
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
+        if self.column_sync_timer is not None:
+            self.after_cancel(self.column_sync_timer)
+        self.column_sync_timer = self.after(20, self.sync_column_widths)
 
     def _save_ui_settings_and_close(self):
         save_ui_settings({
@@ -502,7 +506,7 @@ class IToolApp(tk.Tk):
         # Limpiar headers existentes
         for widget in self.headers_frame.winfo_children():
             widget.destroy()
-        headers = ["Titular", "IP", "Ping", "RDP", "SSH", ""]
+        headers = ["TITULAR", "IP", "PING", "RDP", "SSH", "COPIAR"]
         header_keys = ["titular", "ip", "", "", "", ""]  # Keys para ordenamiento
 
         for col, (h, key) in enumerate(zip(headers, header_keys)):
@@ -666,14 +670,14 @@ class IToolApp(tk.Tk):
 
     def calculate_column_widths(self):
         """Calcula el ancho óptimo para cada columna basado en su contenido"""
-        headers = ["Titular", "IP", "Ping", "RDP", "SSH", ""]
+        headers = ["TITULAR", "IP", "PING", "RDP", "SSH", "COPIAR"]
         column_widths = []
 
         for col, header in enumerate(headers):
             max_length = len(header)  # Empezar con la longitud del header
 
             # Buscar el contenido más largo en cada columna usando TODA la lista, no solo filtrada
-            if col == 0:  # Titular
+            if col == 0:  # TITULAR
                 for pc in self.pc_list:  # Usar pc_list completa en lugar de filtered_list
                     max_length = max(max_length, len(str(pc.get('titular', ''))))
             elif col == 1:  # IP
@@ -683,8 +687,8 @@ class IToolApp(tk.Tk):
                 max_length = 4  # Ancho fijo para el LED
             elif col in [3, 4]:  # Botones de conexión
                 max_length = max(max_length, 11)  # Espacio para "SSH :49151"
-            else:  # Botón de copiado por icono
-                max_length = 3
+            else:  # Botón de copiado por icono y su encabezado
+                max_length = max(max_length, 3)
 
             # Convertir caracteres a píxeles (aproximado: 1 carácter = 8 píxeles)
             # Reducir el padding para evitar espacio extra
@@ -694,18 +698,22 @@ class IToolApp(tk.Tk):
         return column_widths
 
     def sync_column_widths(self):
-        """Sincroniza el ancho de las columnas entre headers y contenido basado en contenido"""
+        """Aplica exactamente los mismos anchos al encabezado y a las filas."""
         try:
+            self.column_sync_timer = None
             self.update_idletasks()
-
-            # Calcular anchos óptimos basados en contenido
             column_widths = self.calculate_column_widths()
 
-            # Aplicar el ancho calculado a todas las columnas
+            # Tk reparte los pesos de dos grids independientes de forma distinta.
+            # El espacio extra se calcula una sola vez para TITULAR y luego se fija
+            # igual en ambos, de modo que los límites verticales coincidan.
+            cell_padding = 4 * len(column_widths)
+            available_width = max(0, self.canvas.winfo_width() - cell_padding)
+            fixed_width = sum(column_widths[1:])
+            column_widths[0] = max(column_widths[0], available_width - fixed_width)
             for col, width in enumerate(column_widths):
-                weight = 1 if col == 0 else 0
-                self.headers_frame.grid_columnconfigure(col, minsize=width, weight=weight)
-                self.scrollable_frame.grid_columnconfigure(col, minsize=width, weight=weight)
+                self.headers_frame.grid_columnconfigure(col, minsize=width, weight=0)
+                self.scrollable_frame.grid_columnconfigure(col, minsize=width, weight=0)
 
         except Exception as e:
             logging.debug(f"Error al sincronizar anchos de columna: {e}")
