@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from itool_app import networking
 from itool_app.remote_desktop import normalize_rdp_username
+from itool_app.settings import load_ui_settings, save_ui_settings
 from itool_app.ui_components import format_status_text
 
 
@@ -42,9 +43,22 @@ class RdpModuleTests(unittest.TestCase):
         self.assertEqual(normalize_rdp_username('persona@empresa.example'), 'persona@empresa.example')
 
 
+class SettingsModuleTests(unittest.TestCase):
+    def test_ui_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / 'ui_settings.json'
+            expected = {
+                'geometry': '900x600+10+20',
+                'sort_column': 'ip',
+                'sort_ascending': False,
+            }
+            save_ui_settings(expected, str(settings_path))
+            self.assertEqual(load_ui_settings(str(settings_path)), expected)
+
+
 class UiModuleTests(unittest.TestCase):
     def test_format_status_text_includes_progress(self):
         self.assertEqual(
-            format_status_text(122, '12:34:56', 5, 366, True),
-            '122 equipos · hoja 12:34:56 · Comprobando: 5/366',
+            format_status_text(122, 8, '12:34:56', 5, 366, False, True),
+            '122 equipos · 8 visibles · hoja 12:34:56 · Comprobando red: 5/366',
         )

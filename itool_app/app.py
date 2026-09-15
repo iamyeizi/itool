@@ -25,7 +25,8 @@ from itool_app.networking import (
 )
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.sheets_source import fetch_pc_records
-from itool_app.ui_components import HoverTooltip, format_status_text
+from itool_app.settings import load_ui_settings, save_ui_settings
+from itool_app.ui_components import format_status_text
 
 # Configuración de logging
 try:
@@ -94,8 +95,10 @@ class IToolApp(tk.Tk):
         self.ssh_buttons = []
         self.rdp_buttons = []  # Para trackear botones RDP
         self.filter_timer = None   # Para debounce del filtro
-        self.sort_column = None    # Columna actual de ordenamiento
-        self.sort_ascending = True # Dirección del ordenamiento
+        self.ui_settings = load_ui_settings()
+        saved_column = self.ui_settings.get('sort_column')
+        self.sort_column = saved_column if saved_column in ('titular', 'ip') else None
+        self.sort_ascending = bool(self.ui_settings.get('sort_ascending', True))
         self.window_size_set = False  # Flag para evitar múltiples ajustes de ventana
         self.search_index = {}
         self.visible_row_ids = ()
@@ -116,8 +119,9 @@ class IToolApp(tk.Tk):
         self.ssh_cache_dirty = False
         self.ssh_cache_save_timer = None
 
-        # Hacer que la ventana no sea redimensionable
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(620, 360)
+        self.protocol('WM_DELETE_WINDOW', self._save_ui_settings_and_close)
 
         # Inicializar interfaz y datos
         self.create_widgets()
@@ -244,9 +248,10 @@ class IToolApp(tk.Tk):
             )
         )
 
-        self.canvas.create_window(
+        self.canvas_window = self.canvas.create_window(
             (0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.bind('<Configure>', self._resize_grid_to_canvas)
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
@@ -258,6 +263,17 @@ class IToolApp(tk.Tk):
 
         # Crear headers fijos
         self.create_fixed_headers()
+
+    def _resize_grid_to_canvas(self, event):
+        self.canvas.itemconfigure(self.canvas_window, width=event.width)
+
+    def _save_ui_settings_and_close(self):
+        save_ui_settings({
+            'geometry': self.geometry(),
+            'sort_column': self.sort_column,
+            'sort_ascending': self.sort_ascending,
+        })
+        self.destroy()
 
     def _is_cache_valid(self, check_type, ip):
         """Verifica la vigencia de un resultado de red específico."""
@@ -330,17 +346,22 @@ class IToolApp(tk.Tk):
             for key in self.active_check_keys
             if key not in self.pending_checks and self._is_cache_valid(*key)
         )
-        loading = self.data_loading or bool(self.pending_checks)
+        network_loading = bool(self.pending_checks)
         self.status_var.set(
             format_status_text(
                 len(self.pc_list),
+                len(self.filtered_list),
                 self.last_sheet_update,
                 completed_checks,
                 total_checks,
-                loading,
+                self.data_loading,
+                network_loading,
             )
         )
-        self.spinner_var.set('◌◓◑◒'[self.spinner_index % 4] if loading else '●')
+        self.spinner_var.set(
+            '◌◓◑◒'[self.spinner_index % 4]
+            if self.data_loading or network_loading else '●'
+        )
 
     def _animate_status(self):
         self.spinner_index += 1
@@ -353,13 +374,18 @@ class IToolApp(tk.Tk):
         import time
         self.last_sheet_update = time.strftime('%H:%M:%S')
         self.pc_list = data
-        self.filtered_list = data.copy()
         self.search_index = {
             id(pc): f"{pc.get('ip', '')} {pc.get('titular', '')}".casefold()
             for pc in data
         }
+        query = self.search_var.get().casefold().strip()
+        self.filtered_list = [
+            pc for pc in data
+            if not query or query in self.search_index.get(id(pc), '')
+        ]
+        self._sort_records(self.filtered_list)
         self.visible_row_ids = ()
-        self.last_search_query = None
+        self.last_search_query = query
         logging.debug(f"Datos cargados: {len(self.pc_list)} PCs")
         self.create_grid()
         if not self.window_size_set:
@@ -397,7 +423,6 @@ class IToolApp(tk.Tk):
             for led, led_ip in self.leds:
                 if led_ip == ip and led.winfo_exists():
                     led.config(fg='green' if result else 'red')
-                    led.tooltip_text = 'Ping respondió' if result else 'Ping sin respuesta'
         elif check_type == 'rdp':
             for button, button_ip in self.rdp_buttons:
                 if button_ip == ip and button.winfo_exists():
@@ -405,22 +430,12 @@ class IToolApp(tk.Tk):
                         state='normal' if result else 'disabled',
                         text='RDP' if result else '✗',
                     )
-                    button.tooltip_text = (
-                        'RDP disponible en el puerto 3389'
-                        if result
-                        else 'RDP no disponible: puerto 3389 cerrado o sin respuesta'
-                    )
         else:
             for button, button_ip in self.ssh_buttons:
                 if button_ip == ip and button.winfo_exists():
                     button.config(
                         state='normal' if result else 'disabled',
                         text=f'SSH :{result}' if result else '✗',
-                    )
-                    button.tooltip_text = (
-                        f'SSH disponible en el puerto {result}'
-                        if result
-                        else 'SSH no disponible en los puertos configurados'
                     )
 
     def _apply_cached_network_statuses(self):
@@ -476,17 +491,7 @@ class IToolApp(tk.Tk):
 
         # Ordenar la lista filtrada
         try:
-            if column == 'ip':
-                # Ordenar primero por VLAN (3er octeto) y luego por host (4to octeto)
-                self.filtered_list.sort(
-                    key=lambda x: ip_vlan_host_sort_key(x.get('ip', '')),
-                    reverse=not self.sort_ascending
-                )
-            else:
-                self.filtered_list.sort(
-                    key=lambda x: str(x.get(column, '')).lower(),
-                    reverse=not self.sort_ascending
-                )
+            self._sort_records(self.filtered_list)
             logging.debug(f"Lista ordenada por {column}, ascendente: {self.sort_ascending}")
 
             # Actualizar headers para mostrar el indicador de ordenamiento
@@ -498,6 +503,19 @@ class IToolApp(tk.Tk):
 
         except Exception as e:
             logging.error(f"Error al ordenar por {column}: {e}")
+
+    def _sort_records(self, records):
+        """Aplica el orden elegido sin cambiar su dirección."""
+        if self.sort_column == 'ip':
+            records.sort(
+                key=lambda item: ip_vlan_host_sort_key(item.get('ip', '')),
+                reverse=not self.sort_ascending,
+            )
+        elif self.sort_column:
+            records.sort(
+                key=lambda item: str(item.get(self.sort_column, '')).casefold(),
+                reverse=not self.sort_ascending,
+            )
 
     def _on_mousewheel(self, event):
         """Permite scroll con la rueda del mouse"""
@@ -526,6 +544,7 @@ class IToolApp(tk.Tk):
                 if query in self.search_index.get(id(pc), '')
             ]
 
+        self._sort_records(filtered_list)
         visible_row_ids = tuple(id(pc) for pc in filtered_list)
         self.filtered_list = filtered_list
         if visible_row_ids == self.visible_row_ids:
@@ -533,6 +552,7 @@ class IToolApp(tk.Tk):
 
         logging.debug(f"Resultados del filtro: {len(filtered_list)} PCs")
         self.update_grid_display()
+        self._refresh_status()
 
     def refresh_data(self):
         if self.data_loading:
@@ -580,11 +600,15 @@ class IToolApp(tk.Tk):
         x = (screen_width - total_width) // 2
         y = (screen_height - total_height) // 2
 
-        # Configurar el tamaño mínimo y máximo para evitar redimensionamiento en ancho
-        self.minsize(total_width, total_height)
-        self.maxsize(total_width, total_height)  # Fijar también la altura
-
-        self.geometry(f"{total_width}x{total_height}+{x}+{y}")
+        saved_geometry = self.ui_settings.get('geometry')
+        if isinstance(saved_geometry, str) and 'x' in saved_geometry:
+            self.geometry(saved_geometry)
+        else:
+            width = min(max(total_width, 700), self.winfo_screenwidth() - 80)
+            height = min(max(total_height, 460), self.winfo_screenheight() - 100)
+            x = (self.winfo_screenwidth() - width) // 2
+            y = (self.winfo_screenheight() - height) // 2
+            self.geometry(f"{width}x{height}+{x}+{y}")
         logging.debug(f"Ventana ajustada a: {total_width}x{total_height} en posición {x},{y}")
 
     def calculate_column_widths(self):
@@ -624,8 +648,9 @@ class IToolApp(tk.Tk):
 
             # Aplicar el ancho calculado a todas las columnas
             for col, width in enumerate(column_widths):
-                self.headers_frame.grid_columnconfigure(col, minsize=width, weight=0)
-                self.scrollable_frame.grid_columnconfigure(col, minsize=width, weight=0)
+                weight = 1 if col == 0 else 0
+                self.headers_frame.grid_columnconfigure(col, minsize=width, weight=weight)
+                self.scrollable_frame.grid_columnconfigure(col, minsize=width, weight=weight)
 
         except Exception as e:
             logging.debug(f"Error al sincronizar anchos de columna: {e}")
@@ -642,6 +667,18 @@ class IToolApp(tk.Tk):
         self.ssh_buttons.clear()
         self.rdp_buttons.clear()
 
+        if not self.filtered_list:
+            message = 'No hay equipos que coincidan con el filtro.' if self.pc_list else 'La hoja no tiene equipos.'
+            tk.Label(
+                self.scrollable_frame,
+                text=message,
+                anchor='center',
+                fg='#555555',
+                pady=24,
+            ).grid(row=0, column=0, columnspan=5, sticky='ew')
+            self.after(100, self.sync_column_widths)
+            return
+
         # Crear cada celda directamente en scrollable_frame para alinear columnas
         for row, pc in enumerate(self.filtered_list):
             # Titular
@@ -653,15 +690,11 @@ class IToolApp(tk.Tk):
             # LED Ping
             led = tk.Label(self.scrollable_frame, text='●', fg='grey', font=('Arial', 12),
                           bg='white' if row % 2 == 0 else '#f0f0f0')
-            led.tooltip_text = 'Comprobando conectividad…'
-            HoverTooltip(led, lambda widget=led: widget.tooltip_text)
             led.grid(row=row, column=2, padx=2, sticky='nsew')
             self.leds.append((led, pc.get('ip', '')))
             # Botón RDP
             btn_normal = tk.Button(self.scrollable_frame, text='RDP', state='disabled',
                                    command=partial(self.connect_login_remoto, pc))
-            btn_normal.tooltip_text = 'Comprobando RDP en el puerto 3389…'
-            HoverTooltip(btn_normal, lambda widget=btn_normal: widget.tooltip_text)
             btn_normal.grid(row=row, column=3, padx=2, sticky='nsew')
             self.rdp_buttons.append((btn_normal, pc.get('ip', '')))  # Trackear para verificar puerto
             if self.system != 'windows' and not self._get_linux_rdp_client():
@@ -669,8 +702,6 @@ class IToolApp(tk.Tk):
             # Botón SSH
             btn_ssh = tk.Button(self.scrollable_frame, text='✗', state='disabled',
                                  command=partial(self.connect_ssh, pc))
-            btn_ssh.tooltip_text = 'Comprobando puertos SSH…'
-            HoverTooltip(btn_ssh, lambda widget=btn_ssh: widget.tooltip_text)
             btn_ssh.grid(row=row, column=4, padx=2, sticky='nsew')
             self.ssh_buttons.append((btn_ssh, pc.get('ip', '')))
 
