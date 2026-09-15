@@ -7,7 +7,7 @@ from itool_app import networking
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.settings import load_ui_settings, save_ui_settings
 from itool_app.sheets_source import describe_sheet_error
-from itool_app.ui_components import format_status_text
+from itool_app.ui_components import format_status_text, value_for_copy
 from itool_app.version import APP_NAME, APP_VERSION
 
 
@@ -77,6 +77,12 @@ class VersionModuleTests(unittest.TestCase):
 
 
 class UiModuleTests(unittest.TestCase):
+    def test_copy_values_use_the_requested_field(self):
+        record = {'ip': '192.168.3.73', 'usuario': 'opera', 'contrasenia': 'secret'}
+        self.assertEqual(value_for_copy(record, 'ip'), '192.168.3.73')
+        self.assertEqual(value_for_copy(record, 'usuario'), 'opera')
+        self.assertEqual(value_for_copy(record, 'contrasenia'), 'secret')
+
     def test_format_status_text_includes_progress(self):
         self.assertEqual(
             format_status_text(122, 8, '12:34:56', 5, 366, False, True),

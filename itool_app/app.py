@@ -26,7 +26,7 @@ from itool_app.networking import (
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.sheets_source import describe_sheet_error, fetch_pc_records
 from itool_app.settings import load_ui_settings, save_ui_settings
-from itool_app.ui_components import format_status_text
+from itool_app.ui_components import format_status_text, value_for_copy
 from itool_app.version import APP_NAME, APP_VERSION
 
 # Configuración de logging
@@ -273,17 +273,15 @@ class IToolApp(tk.Tk):
         """Muestra acciones de copiado solo cuando el usuario las solicita."""
         menu = tk.Menu(self, tearoff=False)
         copy_fields = (
-            ('Copiar IP', pc.get('ip', '')),
-            ('Copiar usuario', pc.get('usuario', '')),
-            ('Copiar contraseña', pc.get('contrasenia', '')),
+            ('Copiar IP', 'ip'),
+            ('Copiar usuario', 'usuario'),
+            ('Copiar contraseña', 'contrasenia'),
         )
-        for label, value in copy_fields:
+        for label, field_name in copy_fields:
+            value = value_for_copy(pc, field_name)
             menu.add_command(
                 label=label,
-                command=lambda copied_value=value, copied_label=label: self._copy_to_clipboard(
-                    copied_value,
-                    copied_label,
-                ),
+                command=partial(self._copy_pc_field, dict(pc), field_name, label),
                 state='normal' if value else 'disabled',
             )
         try:
@@ -291,12 +289,15 @@ class IToolApp(tk.Tk):
         finally:
             menu.grab_release()
 
+    def _copy_pc_field(self, pc, field_name, label):
+        self._copy_to_clipboard(value_for_copy(pc, field_name), label)
+
     def _copy_to_clipboard(self, value, label):
         if not value:
             return
         self.clipboard_clear()
         self.clipboard_append(str(value))
-        self.update()
+        self.update_idletasks()
         self.copy_notice = f'{label} copiado'
         self._refresh_status()
         self.after(2000, self._clear_copy_notice)
@@ -764,8 +765,8 @@ class IToolApp(tk.Tk):
                                  command=partial(self.connect_ssh, pc))
             btn_ssh.grid(row=row, column=4, padx=2, sticky='nsew')
             self.ssh_buttons.append((btn_ssh, pc.get('ip', '')))
-            # El icono abre las opciones para copiar IP, usuario o contraseña.
-            copy_button = tk.Button(self.scrollable_frame, text='⧉', width=3)
+            # Símbolo ASCII para que sea visible incluso con fuentes Tk mínimas en Linux.
+            copy_button = tk.Button(self.scrollable_frame, text='...', width=3)
             copy_button.config(command=lambda button=copy_button, item=pc: self._show_copy_menu(button, item))
             copy_button.grid(row=row, column=5, padx=2, sticky='nsew')
 

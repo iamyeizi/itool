@@ -26,3 +26,8 @@ def format_status_text(
         prefix = 'Comprobando red' if network_loading else 'Red'
         details.append(f'{prefix}: {complete_checks}/{total_checks}')
     return ' · '.join((sheet_status, *details))
+
+
+def value_for_copy(record, field_name):
+    """Devuelve exactamente el campo solicitado para una acción de copiado."""
+    return str(record.get(field_name, ''))
