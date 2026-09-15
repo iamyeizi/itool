@@ -1,24 +1,31 @@
 import tempfile
 import tkinter as tk
-from tkinter import ttk
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from pythonping import ping
 import threading
 import subprocess
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-import ipaddress
-import socket
 import logging
-import json
 from queue import Empty, Queue
 from functools import partial
 import platform
 import shutil
 import shlex
 import sys
+
+from itool_app.network import (
+    SSH_PORTS,
+    check_ping,
+    get_open_ssh_port,
+    ip_vlan_host_sort_key,
+    is_port_open,
+    is_valid_ip,
+    load_ssh_port_cache,
+    save_ssh_port_cache,
+)
+from itool_app.rdp import rdp_username
+from itool_app.sheets import get_pc_list as load_pc_list
+from itool_app.ui import ToolTip, status_text
 
 # Configuración de logging
 try:
@@ -54,95 +61,21 @@ def _resource_base_dir():
 
 BASE_DIR = _resource_base_dir()
 
-# --- Configuración Google Sheets ---
-SCOPE = ['https://spreadsheets.google.com/feeds',
-         'https://www.googleapis.com/auth/drive']
-credential_path = os.path.join(BASE_DIR, 'credential.json')
-CREDS = ServiceAccountCredentials.from_json_keyfile_name(credential_path, SCOPE)
-gc = gspread.authorize(CREDS)
-sheet = gc.open('bd_pcs').sheet1  # Cambia por el nombre de tu sheet
-
 # --- Variables globales ---
-SSH_PORTS = (22, 49151, 4402, 16166, 2222)
-NETWORK_TIMEOUT_SECONDS = 0.5
 NETWORK_CACHE_SECONDS = 30
 NETWORK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix='itool-net')
 DATA_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='itool-data')
 
-
-def _network_cache_path():
-    if platform.system().lower() == 'windows':
-        state_dir = os.path.join(os.getenv('LOCALAPPDATA', os.path.expanduser('~')), 'iTool')
-    else:
-        state_dir = os.path.join(os.getenv('XDG_STATE_HOME', os.path.expanduser('~/.local/state')), 'itool')
-    return os.path.join(state_dir, 'network_cache.json')
-
-
-def load_ssh_port_cache():
-    """Carga únicamente puertos SSH válidos previamente detectados."""
-    try:
-        with open(_network_cache_path(), encoding='utf-8') as cache_file:
-            cached_ports = json.load(cache_file).get('ssh_ports', {})
-        return {
-            ip: port
-            for ip, port in cached_ports.items()
-            if is_valid_ip(ip) and port in SSH_PORTS
-        }
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
-def save_ssh_port_cache(ssh_port_cache):
-    """Guarda de forma atómica los puertos SSH que tuvieron éxito."""
-    cache_path = _network_cache_path()
-    state_dir = os.path.dirname(cache_path)
-    valid_ports = {
-        ip: port
-        for ip, port in ssh_port_cache.items()
-        if is_valid_ip(ip) and port in SSH_PORTS
-    }
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        temp_path = f'{cache_path}.tmp'
-        with open(temp_path, 'w', encoding='utf-8') as cache_file:
-            json.dump({'ssh_ports': valid_ports}, cache_file, sort_keys=True)
-        os.replace(temp_path, cache_path)
-    except OSError as error:
-        logging.debug(f"No se pudo guardar el cache de puertos SSH: {error}")
-
-# --- Optimización de la lectura de Google Sheets ---
 def get_pc_list():
     try:
         logging.info("Obteniendo datos de Google Sheets...")
-        data = sheet.get_all_records()
+        data = load_pc_list(BASE_DIR)
         logging.info(f"Datos obtenidos: {len(data)} registros")
         return data
     except Exception as e:
         logging.error(f"Error al leer Google Sheets: {e}")
         print(f"Error al leer Google Sheets: {e}")
         return []
-
-# --- Validación de direcciones IP ---
-def is_valid_ip(ip):
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
-
-
-def rdp_username(usuario):
-    """Devuelve un usuario explícitamente local cuando no se indicó ámbito.
-
-    RDP interpreta ``EQUIPO\\usuario`` como una cuenta del equipo indicado.
-    Las credenciales simples de la planilla son cuentas locales del destino, por
-    lo que se convierten a ``.\\usuario``. Las cuentas de dominio y Microsoft
-    se preservan tal como fueron cargadas.
-    """
-    usuario = str(usuario).strip()
-    if "\\" in usuario or "@" in usuario:
-        return usuario
-    return f".\\{usuario}"
 
 # --- Clave de ordenamiento natural para IPs (IPv4) ---
 def ip_sort_key(value):
@@ -179,79 +112,6 @@ def ip_last_octet_sort_key(value):
             pass
     return (1, 0)
 
-def ip_vlan_host_sort_key(value):
-    """Clave de ordenamiento por VLAN (3er octeto) y host (4to octeto).
-
-    - IPs válidas: (0, vlan, host)
-    - Vacías/Inválidas: (1, 0, 0) -> al final
-    """
-    ip_str = str(value or '').strip()
-    parts = ip_str.split('.')
-    if len(parts) == 4:
-        try:
-            vlan = int(parts[2])
-            host = int(parts[3])
-            if 0 <= vlan <= 255 and 0 <= host <= 255:
-                return (0, vlan, host)
-        except Exception:
-            pass
-    return (1, 0, 0)
-
-# --- Ping asincrónico con manejo de PCs sin IP ---
-def check_ping(ip):
-    if not ip:
-        return False
-
-    if not is_valid_ip(ip):
-        return False
-
-    try:
-        return ping(ip, 1, 1).success()
-    except Exception as e:
-        logging.debug(f"Error al hacer ping a {ip}: {e}")
-        # Fallback en Linux sin privilegios para usar comando del sistema.
-        if platform.system().lower() == 'linux':
-            try:
-                proc = subprocess.run(
-                    ['ping', '-c', '1', '-W', '1', ip],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return proc.returncode == 0
-            except Exception as fallback_error:
-                logging.debug(f"Fallback ping fallo para {ip}: {fallback_error}")
-        return False
-
-def is_port_open(ip, port):
-    """Verifica si un puerto específico está abierto en una IP dada."""
-    if not ip or not is_valid_ip(ip):
-        return False
-
-    def check_port():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(NETWORK_TIMEOUT_SECONDS)
-                result = s.connect_ex((ip, port))
-                return result == 0
-        except Exception:
-            return False
-
-    try:
-        return check_port()
-    except Exception as e:
-        logging.debug(f"Error al verificar el puerto {port} en {ip}: {e}")
-        return False
-
-
-def get_open_ssh_port(ip, preferred_port=None):
-    """Devuelve un puerto SSH, probando primero el último que funcionó."""
-    if not ip or not is_valid_ip(ip):
-        return None
-
-    ports = ((preferred_port,) if preferred_port in SSH_PORTS else ())
-    ports += tuple(port for port in SSH_PORTS if port != preferred_port)
-    return next((port for port in ports if is_port_open(ip, port)), None)
-
 class iToolApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -277,7 +137,10 @@ class iToolApp(tk.Tk):
         self.last_search_query = None
         self.ui_events = Queue()
         self.pending_checks = set()
+        self.active_check_keys = set()
         self.data_loading = False
+        self.last_sheet_update = None
+        self.spinner_index = 0
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
@@ -295,6 +158,7 @@ class iToolApp(tk.Tk):
         self.create_widgets()
         self.after(50, self._drain_ui_events)
         self.after(1, self.refresh_data)
+        self.after(150, self._animate_status)
         self.after(self.cache_timeout * 1000, self._periodic_network_refresh)
 
     def _set_app_icon(self):
@@ -383,7 +247,15 @@ class iToolApp(tk.Tk):
         search_entry.bind('<Return>', lambda e: self.apply_filter())
         search_entry.bind('<Escape>', lambda e: self.clear_filter())
         tk.Button(search_frame, text="🗑", command=self.clear_filter).pack(side='left', padx=2)
-        tk.Button(search_frame, text="🔄", command=self.refresh_data).pack(side='left', padx=2)
+        self.refresh_button = tk.Button(search_frame, text="🔄", command=self.refresh_data)
+        self.refresh_button.pack(side='left', padx=2)
+
+        status_frame = tk.Frame(main_frame)
+        status_frame.pack(fill='x', pady=(0, 4), expand=False)
+        self.status_var = tk.StringVar(value='Cargando hoja…')
+        self.spinner_var = tk.StringVar(value='○')
+        tk.Label(status_frame, textvariable=self.spinner_var, width=2, anchor='w').pack(side='left')
+        tk.Label(status_frame, textvariable=self.status_var, anchor='w').pack(side='left')
 
         # Frame para headers (FIJO)
         self.headers_frame = tk.Frame(main_frame, bg='lightgray')
@@ -448,7 +320,14 @@ class iToolApp(tk.Tk):
 
     def _schedule_network_checks(self):
         """Encola chequeos limitados sin bloquear el hilo de la interfaz."""
-        for ip in {str(pc.get('ip', '')).strip() for pc in self.pc_list}:
+        ips = {str(pc.get('ip', '')).strip() for pc in self.pc_list}
+        valid_ips = {ip for ip in ips if is_valid_ip(ip)}
+        self.active_check_keys = {
+            (check_type, ip)
+            for ip in valid_ips
+            for check_type in ('ping', 'rdp', 'ssh')
+        }
+        for ip in valid_ips:
             if not is_valid_ip(ip):
                 continue
             self._submit_check('ping', ip, check_ping)
@@ -459,6 +338,7 @@ class iToolApp(tk.Tk):
                 ip,
                 lambda target, preferred=preferred_port: get_open_ssh_port(target, preferred),
             )
+        self._refresh_status()
 
     def _periodic_network_refresh(self):
         self._schedule_network_checks()
@@ -478,8 +358,35 @@ class iToolApp(tk.Tk):
             pass
         self.after(50, self._drain_ui_events)
 
+    def _refresh_status(self):
+        total_checks = len(self.active_check_keys)
+        completed_checks = sum(
+            1
+            for key in self.active_check_keys
+            if key not in self.pending_checks and self._is_cache_valid(*key)
+        )
+        loading = self.data_loading or bool(self.pending_checks)
+        self.status_var.set(
+            status_text(
+                len(self.pc_list),
+                self.last_sheet_update,
+                completed_checks,
+                total_checks,
+                loading,
+            )
+        )
+        self.spinner_var.set('◌◓◑◒'[self.spinner_index % 4] if loading else '●')
+
+    def _animate_status(self):
+        self.spinner_index += 1
+        self._refresh_status()
+        self.after(150, self._animate_status)
+
     def _apply_data(self, data):
         self.data_loading = False
+        self.refresh_button.config(state='normal')
+        import time
+        self.last_sheet_update = time.strftime('%H:%M:%S')
         self.pc_list = data
         self.filtered_list = data.copy()
         self.search_index = {
@@ -494,6 +401,7 @@ class iToolApp(tk.Tk):
             self.adjust_window_to_content()
             self.window_size_set = True
         self._schedule_network_checks()
+        self._refresh_status()
 
     def _apply_network_result(self, check_type, ip, result):
         import time
@@ -511,6 +419,7 @@ class iToolApp(tk.Tk):
                 if self.ssh_cache_save_timer is None:
                     self.ssh_cache_save_timer = self.after(1000, self._save_ssh_port_cache)
         self._update_widgets_for_ip(check_type, ip, result)
+        self._refresh_status()
 
     def _save_ssh_port_cache(self):
         self.ssh_cache_save_timer = None
@@ -523,6 +432,7 @@ class iToolApp(tk.Tk):
             for led, led_ip in self.leds:
                 if led_ip == ip and led.winfo_exists():
                     led.config(fg='green' if result else 'red')
+                    led.tooltip_text = 'Ping respondió' if result else 'Ping sin respuesta'
         elif check_type == 'rdp':
             for button, button_ip in self.rdp_buttons:
                 if button_ip == ip and button.winfo_exists():
@@ -530,12 +440,22 @@ class iToolApp(tk.Tk):
                         state='normal' if result else 'disabled',
                         text='RDP' if result else '✗',
                     )
+                    button.tooltip_text = (
+                        'RDP disponible en el puerto 3389'
+                        if result
+                        else 'RDP no disponible: puerto 3389 cerrado o sin respuesta'
+                    )
         else:
             for button, button_ip in self.ssh_buttons:
                 if button_ip == ip and button.winfo_exists():
                     button.config(
                         state='normal' if result else 'disabled',
-                        text='SSH' if result else '✗',
+                        text=f'SSH :{result}' if result else '✗',
+                    )
+                    button.tooltip_text = (
+                        f'SSH disponible en el puerto {result}'
+                        if result
+                        else 'SSH no disponible en los puertos configurados'
                     )
 
     def _apply_cached_network_statuses(self):
@@ -655,6 +575,8 @@ class iToolApp(tk.Tk):
 
         logging.info("Refrescando datos desde Google Sheets")
         self.data_loading = True
+        self.refresh_button.config(state='disabled')
+        self._refresh_status()
         future = DATA_EXECUTOR.submit(get_pc_list)
 
         def publish_data(completed_future):
@@ -718,7 +640,7 @@ class iToolApp(tk.Tk):
             elif col == 2:  # Ping (solo el LED)
                 max_length = 4  # Ancho fijo para el LED
             elif col in [3, 4]:  # Botones
-                max_length = max(max_length, 8)  # Ancho mínimo para botones
+                max_length = max(max_length, 11)  # Espacio para "SSH :49151"
 
             # Convertir caracteres a píxeles (aproximado: 1 carácter = 8 píxeles)
             # Reducir el padding para evitar espacio extra
@@ -766,11 +688,15 @@ class iToolApp(tk.Tk):
             # LED Ping
             led = tk.Label(self.scrollable_frame, text='●', fg='grey', font=('Arial', 12),
                           bg='white' if row % 2 == 0 else '#f0f0f0')
+            led.tooltip_text = 'Comprobando conectividad…'
+            ToolTip(led, lambda widget=led: widget.tooltip_text)
             led.grid(row=row, column=2, padx=2, sticky='nsew')
             self.leds.append((led, pc.get('ip', '')))
             # Botón RDP
             btn_normal = tk.Button(self.scrollable_frame, text='RDP', state='disabled',
                                    command=partial(self.connect_login_remoto, pc))
+            btn_normal.tooltip_text = 'Comprobando RDP en el puerto 3389…'
+            ToolTip(btn_normal, lambda widget=btn_normal: widget.tooltip_text)
             btn_normal.grid(row=row, column=3, padx=2, sticky='nsew')
             self.rdp_buttons.append((btn_normal, pc.get('ip', '')))  # Trackear para verificar puerto
             if self.system != 'windows' and not self._get_linux_rdp_client():
@@ -778,6 +704,8 @@ class iToolApp(tk.Tk):
             # Botón SSH
             btn_ssh = tk.Button(self.scrollable_frame, text='✗', state='disabled',
                                  command=partial(self.connect_ssh, pc))
+            btn_ssh.tooltip_text = 'Comprobando puertos SSH…'
+            ToolTip(btn_ssh, lambda widget=btn_ssh: widget.tooltip_text)
             btn_ssh.grid(row=row, column=4, padx=2, sticky='nsew')
             self.ssh_buttons.append((btn_ssh, pc.get('ip', '')))
 
