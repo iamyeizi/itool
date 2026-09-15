@@ -6,7 +6,9 @@ from unittest.mock import patch
 from itool_app import networking
 from itool_app.remote_desktop import normalize_rdp_username
 from itool_app.settings import load_ui_settings, save_ui_settings
+from itool_app.sheets_source import describe_sheet_error
 from itool_app.ui_components import format_status_text
+from itool_app.version import APP_NAME, APP_VERSION
 
 
 class NetworkModuleTests(unittest.TestCase):
@@ -54,6 +56,24 @@ class SettingsModuleTests(unittest.TestCase):
             }
             save_ui_settings(expected, str(settings_path))
             self.assertEqual(load_ui_settings(str(settings_path)), expected)
+
+
+class SheetsModuleTests(unittest.TestCase):
+    def test_sheet_error_messages_hide_raw_details(self):
+        self.assertEqual(
+            describe_sheet_error(FileNotFoundError('credential.json')),
+            'No se pudo leer la credencial de Google Sheets.',
+        )
+        self.assertEqual(
+            describe_sheet_error(RuntimeError('403 forbidden service-account@example.invalid')),
+            'Google Sheets rechazó el acceso: revisá los permisos.',
+        )
+
+
+class VersionModuleTests(unittest.TestCase):
+    def test_application_version_is_visible(self):
+        self.assertEqual(APP_NAME, 'iTool')
+        self.assertRegex(APP_VERSION, r'^\d+\.\d+\.\d+$')
 
 
 class UiModuleTests(unittest.TestCase):

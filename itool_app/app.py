@@ -24,9 +24,10 @@ from itool_app.networking import (
     save_ssh_port_cache,
 )
 from itool_app.remote_desktop import normalize_rdp_username
-from itool_app.sheets_source import fetch_pc_records
+from itool_app.sheets_source import describe_sheet_error, fetch_pc_records
 from itool_app.settings import load_ui_settings, save_ui_settings
 from itool_app.ui_components import format_status_text
+from itool_app.version import APP_NAME, APP_VERSION
 
 # Configuración de logging
 try:
@@ -75,7 +76,7 @@ def fetch_pc_list():
 class IToolApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("iTool")
+        self.title(f"{APP_NAME} {APP_VERSION}")
         # Plataforma
         self.system = platform.system().lower()  # 'windows', 'linux', 'darwin'
         # Windows: fijar AppUserModelID para que la barra de tareas agrupe/identifique correctamente
@@ -105,6 +106,7 @@ class IToolApp(tk.Tk):
         self.data_error = None
         self.last_sheet_update = None
         self.spinner_index = 0
+        self.copy_notice = None
 
         # Cache para resultados de ping y puertos
         self.ping_cache = {}       # IP -> bool (ping result)
@@ -267,6 +269,42 @@ class IToolApp(tk.Tk):
         })
         self.destroy()
 
+    def _show_copy_menu(self, widget, pc):
+        """Muestra acciones de copiado solo cuando el usuario las solicita."""
+        menu = tk.Menu(self, tearoff=False)
+        copy_fields = (
+            ('Copiar IP', pc.get('ip', '')),
+            ('Copiar usuario', pc.get('usuario', '')),
+            ('Copiar contraseña', pc.get('contrasenia', '')),
+        )
+        for label, value in copy_fields:
+            menu.add_command(
+                label=label,
+                command=lambda copied_value=value, copied_label=label: self._copy_to_clipboard(
+                    copied_value,
+                    copied_label,
+                ),
+                state='normal' if value else 'disabled',
+            )
+        try:
+            menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _copy_to_clipboard(self, value, label):
+        if not value:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(str(value))
+        self.update()
+        self.copy_notice = f'{label} copiado'
+        self._refresh_status()
+        self.after(2000, self._clear_copy_notice)
+
+    def _clear_copy_notice(self):
+        self.copy_notice = None
+        self._refresh_status()
+
     def _is_cache_valid(self, check_type, ip):
         """Indica si ya hay un resultado de red durante esta sesión."""
         return (check_type, ip) in self.last_check_time
@@ -326,7 +364,7 @@ class IToolApp(tk.Tk):
                 if event[0] == 'data':
                     self._apply_data(event[1])
                 elif event[0] == 'data_error':
-                    self._apply_data_error()
+                    self._apply_data_error(event[1])
                 elif event[0] == 'network_cancelled':
                     self.pending_checks.discard(event[1])
                     self.network_futures.pop(event[1], None)
@@ -346,18 +384,19 @@ class IToolApp(tk.Tk):
             if key not in self.pending_checks and self._is_cache_valid(*key)
         )
         network_loading = any(key in self.pending_checks for key in self.active_check_keys)
-        self.status_var.set(
-            format_status_text(
-                len(self.pc_list),
-                len(self.filtered_list),
-                self.last_sheet_update,
-                completed_checks,
-                total_checks,
-                self.data_loading,
-                network_loading,
-                self.data_error,
-            )
+        status = format_status_text(
+            len(self.pc_list),
+            len(self.filtered_list),
+            self.last_sheet_update,
+            completed_checks,
+            total_checks,
+            self.data_loading,
+            network_loading,
+            self.data_error,
         )
+        if self.copy_notice:
+            status = f'{status} · {self.copy_notice}'
+        self.status_var.set(status)
         self.spinner_var.set(
             '◌◓◑◒'[self.spinner_index % 4]
             if self.data_loading or network_loading else '●'
@@ -395,10 +434,10 @@ class IToolApp(tk.Tk):
         self._schedule_network_checks(force=True)
         self._refresh_status()
 
-    def _apply_data_error(self):
+    def _apply_data_error(self, error_message):
         """Conserva los datos visibles si una actualización de la hoja falla."""
         self.data_loading = False
-        self.data_error = 'No se pudo actualizar la hoja'
+        self.data_error = error_message
         self.refresh_button.config(state='normal')
         if not self.pc_list:
             self.create_grid()
@@ -463,8 +502,8 @@ class IToolApp(tk.Tk):
         # Limpiar headers existentes
         for widget in self.headers_frame.winfo_children():
             widget.destroy()
-        headers = ["Titular", "IP", "Ping", "RDP", "SSH"]
-        header_keys = ["titular", "ip", "", "", ""]  # Keys para ordenamiento
+        headers = ["Titular", "IP", "Ping", "RDP", "SSH", ""]
+        header_keys = ["titular", "ip", "", "", "", ""]  # Keys para ordenamiento
 
         for col, (h, key) in enumerate(zip(headers, header_keys)):
             if key:  # Solo las columnas con datos son clickeables
@@ -581,8 +620,8 @@ class IToolApp(tk.Tk):
             try:
                 data = completed_future.result()
             except Exception as error:
-                logging.error(f"Error al refrescar datos: {error}")
-                self.ui_events.put(('data_error',))
+                logging.error("Error al refrescar Google Sheets (%s)", type(error).__name__)
+                self.ui_events.put(('data_error', describe_sheet_error(error)))
                 return
             self.ui_events.put(('data', data))
 
@@ -627,7 +666,7 @@ class IToolApp(tk.Tk):
 
     def calculate_column_widths(self):
         """Calcula el ancho óptimo para cada columna basado en su contenido"""
-        headers = ["Titular", "IP", "Ping", "RDP", "SSH"]
+        headers = ["Titular", "IP", "Ping", "RDP", "SSH", ""]
         column_widths = []
 
         for col, header in enumerate(headers):
@@ -642,8 +681,10 @@ class IToolApp(tk.Tk):
                     max_length = max(max_length, len(str(pc.get('ip', ''))))
             elif col == 2:  # Ping (solo el LED)
                 max_length = 4  # Ancho fijo para el LED
-            elif col in [3, 4]:  # Botones
+            elif col in [3, 4]:  # Botones de conexión
                 max_length = max(max_length, 11)  # Espacio para "SSH :49151"
+            else:  # Botón de copiado por icono
+                max_length = 3
 
             # Convertir caracteres a píxeles (aproximado: 1 carácter = 8 píxeles)
             # Reducir el padding para evitar espacio extra
@@ -694,7 +735,7 @@ class IToolApp(tk.Tk):
                 anchor='center',
                 fg='#555555',
                 pady=24,
-            ).grid(row=0, column=0, columnspan=5, sticky='ew')
+            ).grid(row=0, column=0, columnspan=6, sticky='ew')
             self.after(100, self.sync_column_widths)
             return
 
@@ -723,6 +764,10 @@ class IToolApp(tk.Tk):
                                  command=partial(self.connect_ssh, pc))
             btn_ssh.grid(row=row, column=4, padx=2, sticky='nsew')
             self.ssh_buttons.append((btn_ssh, pc.get('ip', '')))
+            # El icono abre las opciones para copiar IP, usuario o contraseña.
+            copy_button = tk.Button(self.scrollable_frame, text='⧉', width=3)
+            copy_button.config(command=lambda button=copy_button, item=pc: self._show_copy_menu(button, item))
+            copy_button.grid(row=row, column=5, padx=2, sticky='nsew')
 
             # Configurar el peso de cada fila
             self.scrollable_frame.grid_rowconfigure(row, weight=1)
